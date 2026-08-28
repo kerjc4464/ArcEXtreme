@@ -555,9 +555,9 @@
             <div class="flex-container flexFlowColumn marginTop5" style="border:1px solid var(--ax-border); border-radius:10px; padding:10px; background:rgba(255,255,255,.03)">
                 <label for="arcextreme-subagent-mode"><small><i class="fa-solid fa-code-branch"></i> SubAgent并发模式</small></label>
                 <select id="arcextreme-subagent-mode" class="text_pole">
-                    <option value="perRole">perRole - 每角色一次调用（角色隔离，推荐）</option>
-                    <option value="mixed">mixed - 混合15条一批（省token）</option>
-                    <option value="perEvent">perEvent - 每事件一请求（crazy 45并发）</option>
+                    <option value="perRole">Standard (perRole) - 每角色一次调用（角色隔离，推荐）</option>
+                    <option value="mixed">Lite (mixed) - 混合15条一批（省token）</option>
+                    <option value="perEvent">GameBreaker (perEvent) - 每事件一请求（crazy 45并发）</option>
                 </select>
                 <small class="ax-hint">3魂×15=45时：perRole=3次调用，mixed≈3次，perEvent=45次并发。不计成本选perEvent</small>
                 <label class="checkbox_label marginTop5" for="arcextreme-subagent-collapse">
