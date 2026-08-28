@@ -13,7 +13,7 @@ import {
     renderExtensionTemplateAsync,
 } from '../../../extensions.js';
 
-import { SETTINGS_KEY, EXTENSION_NAME, defaultSettings, mergeDefaults, BUCKETS, DEFAULT_EXTRACT_SYS, DEFAULT_EXTRACT_USER, DEFAULT_ROUTE_SYS, DEFAULT_ROUTE_USER, DEFAULT_SUBAGENT_SYS, DEFAULT_SUBAGENT_USER, DEFAULT_SUBLIMATE_SYS, DEFAULT_SUBLIMATE_USER, buildContextText } from './src/config.js';
+import { SETTINGS_KEY, EXTENSION_NAME, defaultSettings, mergeDefaults, BUCKETS, DEFAULT_EXTRACT_SYS, DEFAULT_EXTRACT_USER, DEFAULT_ROUTE_SYS, DEFAULT_ROUTE_USER, DEFAULT_SUBAGENT_SYS, DEFAULT_SUBAGENT_USER, DEFAULT_SUBLIMATE_SYS, DEFAULT_SUBLIMATE_USER, buildContextText, filterEnabledSouls, getEnabledSoulNames } from './src/config.js';
 import { backend } from './src/backend.js';
 import { embedTexts } from './src/embeddings.js';
 import { rerank } from './src/rerank.js';
@@ -97,6 +97,25 @@ function ensureSettings() {
     } else {
         mergeDefaults(extension_settings[SETTINGS_KEY], defaultSettings());
     }
+}
+
+// Soul 启用（B方案 后端持久化）—— 统一过滤入口
+async function getEnabledSouls() {
+    try {
+        const full = await backend.listSoulsFull().catch(()=>null);
+        if (full && Array.isArray(full.souls)) {
+            const enabledMap = full.enabled_map || {};
+            const filtered = filterEnabledSouls(full.souls, enabledMap);
+            return { all: full.souls, enabled: filtered, map: enabledMap };
+        }
+        const souls = await backend.listSouls().catch(()=>[]);
+        return { all: souls, enabled: souls.filter(s=>s.enabled!==false), map: {} };
+    } catch { return { all: [], enabled: [], map: {} }; }
+}
+function soulsToNames(souls){ return (souls||[]).map(x=>x.name); }
+function isValidChatId(id){
+    const s = String(id||'').trim();
+    return !!s && s !== 'undefined' && s !== 'null' && s !== 'false';
 }
 
 // --------------------------------------------------------------------------- //
@@ -189,6 +208,10 @@ async function onUserMessage(mesId) {
 
 async function processUserInput(text, chatId, contextText = '') {
     const s = S();
+    if (!isValidChatId(chatId)) {
+        if (s.debug) log(`事件提炼：chatId 无效(${chatId})，跳过`);
+        return;
+    }
     if (!s.extractLLM.apiUrl) {
         if (s.debug) log('未配置提取 LLM，跳过事件记录');
         return;
@@ -204,11 +227,21 @@ async function processUserInput(text, chatId, contextText = '') {
         } catch {}
     }
     let souls = [];
+    let enabledSouls = [];
     try {
-        souls = await backend.listSouls();
+        const en = await getEnabledSouls();
+        souls = en.all;
+        enabledSouls = en.enabled;
+        if (!enabledSouls.length && souls.length) {
+            if (s.debug) log('全部 Souls 已禁用，跳过事件提炼');
+            notify('事件提炼', false, '全部 Souls 已禁用');
+            return;
+        }
     } catch (e) {
         if (s.debug) log(`获取 souls 列表失败: ${e.message}`);
     }
+    // 仅对启用 souls 提炼（B方案）
+    souls = enabledSouls.length ? enabledSouls : souls.filter(s=>s.enabled!==false);
     const soulNames = souls.map((x) => x.name);
     // 预取 souls 内容供2bit初值判断（结合人设）——必须全量，保证每个soul都能读到原文
     const soulsContentsMapForExtract = {};
@@ -299,6 +332,11 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
     try {
         const ctx = getContext();
         const chatId = ctx.chatId || getCurrentChatId();
+        if (!isValidChatId(chatId)) {
+            if (s.debug) log(`生成拦截：chatId 无效(${chatId})，跳过`);
+            try{ clearInjection(s); }catch{}
+            return;
+        }
         const source = chat && chat.length ? chat : ctx.chat || [];
         const lastUser = [...source].reverse().find((m) => m.is_user);
         const userText = lastUser ? lastUser.mes : '';
@@ -321,18 +359,32 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             notify('近期事件', false, e.message);
         }
 
-        // Stage B: SubAgent 裁判（短期池每事件一Agent）
+        // Stage B: SubAgent 裁判（短期池每事件一Agent）—— 仅启用 souls 参与
         let shortPoolGrouped = {};
         let shortPoolItems = [];
         let subEvalCount = 0;
+        let enabledSoulsForStage = [];
+        let enabledSetForStage = new Set();
+        try {
+            const enStage = await getEnabledSouls().catch(()=>({all:[], enabled:[]}));
+            enabledSoulsForStage = enStage.enabled || [];
+            enabledSetForStage = new Set(enabledSoulsForStage.map(x=>x.name));
+        } catch {}
         try {
             setPipeline('subagent');
             // 拉取短期池（传入前端 perSoulCap 以自愈历史超限）
             const sp = await backend.getShortPool(chatId, undefined, Number(s.shortPool?.perSoulCap||15));
-            shortPoolGrouped = sp.pools || {};
-            shortPoolItems = sp.events || [];
+            // 过滤禁用 soul 的池项（不裁判、不注入）
+            let rawGrouped = sp.pools || {};
+            let rawItems = sp.events || [];
+            if (enabledSetForStage.size) {
+                const fg = {};
+                for (const [k,v] of Object.entries(rawGrouped)) if (enabledSetForStage.has(k)) fg[k]=v;
+                shortPoolGrouped = fg;
+                shortPoolItems = rawItems.filter(it=> enabledSetForStage.has(it.pool_soul || it.state_soul || it.soul));
+            } else { shortPoolGrouped = rawGrouped; shortPoolItems = rawItems; }
             // 准备 soulsContentMap —— 按短期池实际涉及的soul全量拉取，保证每个Agent都能读到原文
-            const souls = await backend.listSouls().catch(()=>[]);
+            const souls = enabledSoulsForStage.length ? enabledSoulsForStage : await backend.listSouls().catch(()=>[]);
             const soulsContentMap = {};
             const poolSoulSet = new Set(shortPoolItems.map(it=> it.pool_soul || it.state_soul || it.soul).filter(Boolean));
             const soulsToFetch = poolSoulSet.size ? souls.filter(so=> poolSoulSet.has(so.name)) : souls;
@@ -365,10 +417,16 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                         subEvalCount = syncRes.count||0;
                         log(`SubAgent完成: ${evaluations.map(e=>`${e.soul}#${e.event_id}:${e.action}`).join(' | ')}`);
                         notify('SubAgent裁判', true, `${subEvalCount} 已更新`);
-                        // 刷新分组
+                        // 刷新分组（过滤禁用）
                         const sp2 = await backend.getShortPool(chatId, undefined, Number(s.shortPool?.perSoulCap||15));
-                        shortPoolGrouped = sp2.pools || {};
-                        shortPoolItems = sp2.events || [];
+                        let g2 = sp2.pools || {};
+                        let e2 = sp2.events || [];
+                        if (enabledSetForStage.size) {
+                            const fg={}; for(const [k,v] of Object.entries(g2)) if(enabledSetForStage.has(k)) fg[k]=v;
+                            g2=fg; e2=e2.filter(it=> enabledSetForStage.has(it.pool_soul||it.state_soul||it.soul));
+                        }
+                        shortPoolGrouped = g2;
+                        shortPoolItems = e2;
                     }
                 }
             } else {
@@ -388,18 +446,29 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             const skipThr = Number(s.shortPool?.skipThreshold||3);
             const prep = await backend.prepareShortPool(chatId, cap, skipThr);
             freedInfo = prep;
-            vacanciesTotal = Object.values(prep.vacancies||{}).reduce((a,b)=>a+b,0);
+            // 过滤禁用 souls 的 vacancies（不为其腾位/回填）
+            if (enabledSetForStage.size && freedInfo && freedInfo.vacancies) {
+                const filtVac = {};
+                for (const [k,v] of Object.entries(freedInfo.vacancies)) if (enabledSetForStage.has(k)) filtVac[k]=v;
+                freedInfo.vacancies = filtVac;
+            }
+            vacanciesTotal = Object.values((freedInfo&&freedInfo.vacancies)||{}).reduce((a,b)=>a+b,0);
             if (prep.count) {
-                log(`短期池清理: 释放 ${prep.count} 条 vacancies=${JSON.stringify(prep.vacancies)} freed=${JSON.stringify(prep.freed)}`);
+                log(`短期池清理: 释放 ${prep.count} 条 vacancies=${JSON.stringify(freedInfo.vacancies)} freed=${JSON.stringify(prep.freed)}`);
                 // 刷新
                 const sp3 = await backend.getShortPool(chatId, undefined, Number(s.shortPool?.perSoulCap||15));
-                shortPoolGrouped = sp3.pools || {};
+                let g3 = sp3.pools || {};
+                if (enabledSetForStage.size) {
+                    const fg={}; for(const [k,v] of Object.entries(g3)) if(enabledSetForStage.has(k)) fg[k]=v;
+                    g3=fg;
+                }
+                shortPoolGrouped = g3;
             }
         } catch(e){
             log(`短期池清理失败: ${e.message}`);
         }
 
-        // Stage D：路由 LLM 选择分桶 / souls
+        // Stage D：路由 LLM 选择分桶 / souls — 仅启用 souls
         let buckets = [];
         let soulsSel = [];
         const routeCfg = s.routeLLM.useExtract ? s.extractLLM : s.routeLLM;
@@ -407,7 +476,8 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             setPipeline('route');
             notify('路由决策', null, `模型 ${routeCfg.model||'—'} 开始调用`);
             try {
-                const souls = await backend.listSouls();
+                const enR = await getEnabledSouls().catch(()=>({enabled:[]}));
+                const souls = (enR.enabled && enR.enabled.length) ? enR.enabled : await backend.listSouls();
                 const soulsContents = [];
                 for (const so of souls.slice(0, 12)) {
                     try {
@@ -418,6 +488,8 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 const route = await routeQuery(s, userText, soulsContents, contextTextRoute);
                 buckets = route.buckets;
                 soulsSel = route.souls;
+                // 与启用集取交集，禁用 souls 不参与检索
+                if (enabledSetForStage.size) soulsSel = soulsSel.filter(n=> enabledSetForStage.has(n));
                 notify('路由决策', true, `分桶[${buckets.join(',')||'无'}] souls[${soulsSel.join(',')||'—'}]`);
             } catch (e) {
                 notify('路由决策', false, e.message);
@@ -622,7 +694,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             }
         }
 
-        // Stage G：升华检测（深度推理）——按候选soul全量拉取，保证每条升华都读到对应Soul原文
+        // Stage G：升华检测（深度推理）——仅启用 souls 参与升华
         let sublimatedItems = [];
         try {
             setPipeline('sublimate');
@@ -630,8 +702,11 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             const thr = Number(s.shortPool?.stuckThreshold||8);
             let preCandidates=[];
             try{ const chk=await backend.checkSublimation(chatId, thr); preCandidates=chk.candidates||[]; }catch{}
+            // 禁用 souls 的候选直接剔除
+            if (enabledSetForStage.size) preCandidates = preCandidates.filter(c=> enabledSetForStage.has(c.soul));
             const candSoulSet = new Set(preCandidates.map(c=>c.soul).filter(Boolean));
-            const souls = await backend.listSouls().catch(()=>[]);
+            const soulsAll = await backend.listSouls().catch(()=>[]);
+            const souls = enabledSetForStage.size ? soulsAll.filter(so=> enabledSetForStage.has(so.name)) : soulsAll;
             const soulsToFetchForSub = candSoulSet.size ? souls.filter(so=> candSoulSet.has(so.name)) : souls;
             const soulsContentMap = {};
             let subFetchOk=0, subFetchFail=0;
@@ -652,25 +727,34 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                     // 同时需要 refresh soul list
                     if (s.debug) refreshSouls();
                 }catch(e){ log(`升华注入失败: ${e.message}`);}
-                // 刷新短期池（已移除升华事件）
+                // 刷新短期池（已移除升华事件）——过滤禁用
                 const sp5 = await backend.getShortPool(chatId, undefined, Number(s.shortPool?.perSoulCap||15)).catch(()=>({pools:{}}));
-                shortPoolGrouped = sp5.pools || shortPoolGrouped;
+                let g5 = sp5.pools || shortPoolGrouped;
+                if (enabledSetForStage.size) {
+                    const fg={}; for(const [k,v] of Object.entries(g5)) if(enabledSetForStage.has(k)) fg[k]=v;
+                    g5=fg;
+                }
+                shortPoolGrouped = g5;
             }
         } catch(e){
             log(`升华检测失败: ${e.message}`);
         }
 
-        // 对于已升华但之前存在的记录，也要注入（保证持久）
+        // 对于已升华但之前存在的记录，也要注入（保证持久）——过滤禁用
         if (!sublimatedItems.length) {
             try{
                 const persisted = await backend.listSublimated(chatId).catch(()=>[]);
                 if(persisted.length){
-                    // 最近5条
-                    const recentSub = persisted.slice(0,5);
-                    injectSublimated(s, recentSub);
-                    sublimatedItems = recentSub;
+                    let recentSub = persisted.slice(0,5);
+                    if (enabledSetForStage.size) recentSub = recentSub.filter(x=> enabledSetForStage.has(x.soul));
+                    if(recentSub.length){
+                        injectSublimated(s, recentSub);
+                        sublimatedItems = recentSub;
+                    }
                 }
             }catch{}
+        } else if (enabledSetForStage.size) {
+            sublimatedItems = sublimatedItems.filter(x=> enabledSetForStage.has(x.soul));
         }
 
         // Stage H：注入
@@ -697,19 +781,38 @@ window['arcextreme_generate'] = arcextreme_generate;
 // --------------------------------------------------------------------------- //
 async function refreshSouls() {
     try {
-        const souls = await backend.listSouls();
-        renderSoulsList(souls);
-        // 同步过滤下拉
+        const full = await backend.listSoulsFull().catch(async ()=> ({souls: await backend.listSouls(), enabled_map:{}}));
+        const souls = full.souls || [];
+        const enabledMap = full.enabled_map || {};
+        // render with toggle (B方案 后端持久化)
+        const summary = document.getElementById('arcextreme-souls-summary');
+        if (summary) {
+            const enabledCnt = souls.filter(s=> s.enabled!==false).length;
+            summary.textContent = `${enabledCnt}/${souls.length} 启用`;
+            summary.style.color = enabledCnt===0 ? '#ef4444' : enabledCnt===souls.length ? '#10b981' : '#f59e0b';
+        }
+        const onToggle = async (name, val) => {
+            const curMap = {};
+            for (const so of souls) curMap[so.name] = so.enabled !== false;
+            curMap[name] = val;
+            await backend.setSoulsEnabled(curMap);
+            log(`Soul ${name} 已${val?'启用':'禁用'} (B方案已持久化)`);
+            pushToast('ok', `${name} 已${val?'启用':'禁用'}`);
+            await refreshSouls();
+        };
+        try { renderSoulsList(souls, {onToggle, enabledMap}); } catch { renderSoulsList(souls); }
+        // 同步过滤下拉 - 显示全部但禁用项加标记
         const selShort = document.getElementById('arcextreme-short-filter-soul');
         const selLong = document.getElementById('arcextreme-long-filter-soul');
         const curShort = selShort ? selShort.value : '';
         const curLong = selLong ? selLong.value : '';
+        const optHtml = '<option value="">全部soul</option>' + souls.map(s=>`<option value="${s.name}" ${s.enabled===false?'style="color:#ef4444"':''}>${s.name}${s.enabled===false?' (禁)':''}</option>`).join('');
         if (selShort){
-            selShort.innerHTML = '<option value="">全部soul</option>' + souls.map(s=>`<option value="${s.name}">${s.name}</option>`).join('');
+            selShort.innerHTML = optHtml;
             selShort.value = curShort;
         }
         if (selLong){
-            selLong.innerHTML = '<option value="">全部soul</option>' + souls.map(s=>`<option value="${s.name}">${s.name}</option>`).join('');
+            selLong.innerHTML = optHtml;
             selLong.value = curLong;
         }
         // 同步到模态框下拉
@@ -945,11 +1048,15 @@ function syncModalSoulFilters(){
 }
 async function refreshModalSouls(){
     try{
-        const souls = await backend.listSouls();
+        const full = await backend.listSoulsFull().catch(async ()=>({souls: await backend.listSouls(), enabled_map:{}}));
+        const souls = full.souls || [];
         const ul = document.getElementById('arcextreme-modal-souls');
         if (!ul) return;
         if (!souls.length) ul.innerHTML = '<li class="ax-empty"><i class="fa-solid fa-ghost"></i> 暂无 souls</li>';
-        else ul.innerHTML = souls.map(s=> `<li><span class="tag tag--soul"><i class="fa-solid fa-user-tag"></i> ${s.name}</span><span class="ax-event__text">${s.filename||''}<small class="ax-event__meta" style="opacity:.5">${s.name}</small></span></li>`).join('');
+        else ul.innerHTML = souls.map(s=> {
+            const en = s.enabled!==false;
+            return `<li style="${en?'':'opacity:.5; background:rgba(239,68,68,.06)'}"><span class="tag tag--soul"><i class="fa-solid fa-user-tag"></i> ${s.name}</span><span class="ax-event__text">${s.filename||''}<small class="ax-event__meta" style="opacity:.5">${s.name} · ${en?'已启用':'已禁用'}</small></span>${en?'<small style="color:#10b981">●</small>':'<small style="color:#ef4444">○</small>'}</li>`;
+        }).join('');
         // 同时同步下拉
         syncModalSoulFilters();
     }catch(e){ const ul=document.getElementById('arcextreme-modal-souls'); if(ul) ul.innerHTML=`<li class="ax-empty">加载失败: ${e.message}</li>`; }
@@ -1177,6 +1284,169 @@ async function refreshSublimated(){
             `).join('');
         }
     }catch(e){ log(`升华刷新失败: ${e.message}`); }
+}
+
+// ---------------- Chat 迁移 & 备份 ----------------
+async function refreshChats() {
+    const tbody = document.getElementById('arcextreme-chats-tbody');
+    const summary = document.getElementById('arcextreme-chats-summary');
+    if (!tbody) return;
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; opacity:.6; padding:12px"><i class="fa-solid fa-spinner fa-spin"></i> 载入中…</td></tr>`;
+    try {
+        const data = await backend.listChats();
+        const chats = data.chats || [];
+        const curId = getContext().chatId || getCurrentChatId();
+        if (summary) summary.textContent = `${chats.length} 个聊天`;
+        if (!chats.length) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; opacity:.6; padding:12px"><i class="fa-solid fa-inbox"></i> 暂无聊天数据</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = chats.map(c=> {
+            const shortId = c.chat_id.length>28 ? c.chat_id.slice(0,12)+'…'+c.chat_id.slice(-10) : c.chat_id;
+            const curBadge = c.chat_id===curId ? '<span class="ax-badge" style="background:#10b981;color:#fff;font-size:10px">当前</span>':'' ;
+            const soulsTxt = (c.souls||[]).slice(0,3).join(',') + ((c.souls||[]).length>3?',…':'');
+            const ts = c.max_ts ? new Date(c.max_ts).toLocaleString() : '—';
+            return `<tr data-chat="${c.chat_id.replace(/"/g,'&quot;')}" style="${c.chat_id===curId?'background:rgba(16,185,129,.08)':''}">
+                <td><input type="radio" name="arcextreme-chat-radio" value="${c.chat_id.replace(/"/g,'&quot;')}"></td>
+                <td title="${c.chat_id.replace(/"/g,'&quot;')}">${shortId} ${curBadge}</td>
+                <td>${c.events}</td>
+                <td>${c.short_pool}</td>
+                <td>${c.sublimated}</td>
+                <td title="${(c.souls||[]).join(', ')}">${soulsTxt||'—'}</td>
+                <td style="font-size:11px; opacity:.7">${ts}</td>
+            </tr>`;
+        }).join('');
+        tbody.querySelectorAll('input[name="arcextreme-chat-radio"]').forEach(r=>{
+            r.addEventListener('change', ()=>{
+                const v = r.value;
+                const src = document.getElementById('arcextreme-migrate-source');
+                if (src) src.value = v;
+            });
+        });
+        tbody.querySelectorAll('tr[data-chat]').forEach(tr=>{
+            tr.style.cursor='pointer';
+            tr.addEventListener('click', (e)=>{
+                if (e.target.tagName==='INPUT') return;
+                const cid = tr.getAttribute('data-chat');
+                const radio = tr.querySelector('input[type="radio"]');
+                if (radio) radio.checked=true;
+                const src = document.getElementById('arcextreme-migrate-source');
+                if (src) src.value=cid;
+            });
+        });
+    } catch(e){
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#ef4444; padding:12px">载入失败: ${e.message}</td></tr>`;
+        log(`聊天清单刷新失败: ${e.message}`);
+    }
+}
+async function doMigrate(mode) {
+    const src = document.getElementById('arcextreme-migrate-source')?.value?.trim();
+    let dst = document.getElementById('arcextreme-migrate-target')?.value?.trim();
+    if (!dst) dst = getContext().chatId || getCurrentChatId();
+    if (!src) { pushToast('warn','请选择源 chat_id'); return; }
+    if (!dst) { pushToast('warn','目标 chat_id 为空'); return; }
+    const overwrite = !!document.getElementById('arcextreme-migrate-overwrite')?.checked;
+    const radios = document.querySelectorAll('input[name="arcextreme-migrate-mode"]');
+    let radioMode = mode;
+    if (!radioMode) {
+        const checked = [...radios].find(r=>r.checked);
+        radioMode = checked ? checked.value : 'copy';
+    }
+    if (radioMode==='move' && !confirm(`确认【移动】 ${src} → ${dst} ？\n源将被删除，此操作不可撤销。`)) return;
+    if (overwrite && !confirm(`确认覆盖目标 ${dst} ？目标现有数据将被先清空`)) return;
+    const status = document.getElementById('arcextreme-migrate-status');
+    if (status) status.textContent = '迁移中…';
+    try{
+        const res = await backend.migrateChat({source_chat_id: src, target_chat_id: dst, mode: radioMode, overwrite, include_events:true, include_state:true, include_pool:true, include_sublimated:true});
+        const s = res.stats || {};
+        log(`迁移完成 ${radioMode} ${src}→${dst} 事件${s.events} 状态${s.state} 池${s.pool} 升华${s.sublimated} FAISS+${s.faiss_added||0}`);
+        pushToast('ok', `迁移完成 ${radioMode} 事件${s.events}`);
+        if (status) status.textContent = `完成 ${radioMode} 事件${s.events} 状态${s.state} 池${s.pool}`;
+        refreshChats(); refreshEvents(); refreshShortPool(); refreshSublimated();
+        try{ await backend.reload(); }catch{}
+    }catch(e){
+        log(`迁移失败: ${e.message}`);
+        pushToast('fail', `迁移失败: ${e.message}`);
+        if (status) status.textContent = `失败: ${e.message}`;
+    }
+}
+async function doExportChat(){
+    let cid = document.getElementById('arcextreme-export-chat')?.value?.trim();
+    if (!cid) cid = getContext().chatId || getCurrentChatId();
+    if (!cid) { pushToast('warn','无 chat_id'); return; }
+    try{
+        const data = await backend.exportChat(cid);
+        const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href=url; a.download=`arcextreme-${cid.slice(0,12)}-${Date.now()}.json`;
+        document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+        log(`已导出 ${cid} 事件${data.counts.events} 池${data.counts.pool}`);
+        pushToast('ok', `已导出 ${data.counts.events} 事件`);
+    }catch(e){ pushToast('fail', `导出失败: ${e.message}`); }
+}
+async function doImportChat(){
+    const fileEl = document.getElementById('arcextreme-import-file');
+    const targetEl = document.getElementById('arcextreme-import-target');
+    const overwrite = !!document.getElementById('arcextreme-import-overwrite')?.checked;
+    const file = fileEl?.files?.[0];
+    if (!file) { pushToast('warn','请选择 JSON 文件'); return; }
+    let target = targetEl?.value?.trim();
+    if (!target) target = getContext().chatId || getCurrentChatId();
+    if (!target) { pushToast('warn','目标 chat_id 为空'); return; }
+    try{
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const payload = {chat_id: target, overwrite, events: data.events||[], states: data.states||[], pools: data.pools||[], sublimated: data.sublimated|| data.sub||[]};
+        if (!payload.events.length && !payload.sublimated.length) { pushToast('warn','文件无有效数据'); return; }
+        if (overwrite && !confirm(`覆盖导入到 ${target} ？目标将被先清空`)) return;
+        const res = await backend.importChat(payload);
+        log(`导入完成 → ${target} 事件${res.stats.events} 状态${res.stats.state} 池${res.stats.pool} 升华${res.stats.sublimated}`);
+        pushToast('ok', `导入完成 事件${res.stats.events}`);
+        refreshChats(); refreshEvents(); refreshShortPool(); refreshSublimated();
+        try{ await backend.reload(); }catch{}
+    }catch(e){ pushToast('fail', `导入失败: ${e.message}`); log(`导入失败: ${e.message}`); }
+}
+function setupMigrateUI(){
+    document.getElementById('arcextreme-refresh-chats')?.addEventListener('click', refreshChats);
+    document.getElementById('arcextreme-migrate-target-current')?.addEventListener('click', ()=>{
+        const cur = getContext().chatId || getCurrentChatId();
+        const el = document.getElementById('arcextreme-migrate-target');
+        if (el) el.value = cur;
+        pushToast('info', `已填入当前: ${cur.slice(0,16)}…`);
+    });
+    document.getElementById('arcextreme-migrate-do-copy')?.addEventListener('click', ()=> doMigrate('copy'));
+    document.getElementById('arcextreme-migrate-do-move')?.addEventListener('click', ()=> doMigrate('move'));
+    document.getElementById('arcextreme-chats-select-all')?.addEventListener('change', (e)=>{
+        // radio 单选，select-all 仅提示
+        if (e.target.checked) pushToast('info','聊天为单选迁移，请点行选择源');
+        e.target.checked=false;
+    });
+    document.getElementById('arcextreme-chats-delete-tool')?.addEventListener('click', async ()=>{
+        const src = document.getElementById('arcextreme-migrate-source')?.value?.trim();
+        if (!src) { pushToast('warn','先选源 chat_id'); return; }
+        const inp = prompt(`单做工具-删除聊天\n输入 DELETE 确认删除\n${src}`);
+        if (inp!=='DELETE') { pushToast('info','已取消'); return; }
+        try{ await backend.deleteChat(src); log(`已删除孤儿聊天 ${src}`); pushToast('ok','已删除'); refreshChats(); }catch(e){ pushToast('fail', e.message); }
+    });
+    document.getElementById('arcextreme-export-do')?.addEventListener('click', doExportChat);
+    document.getElementById('arcextreme-import-do')?.addEventListener('click', doImportChat);
+    // souls 批量
+    document.getElementById('arcextreme-souls-enable-all')?.addEventListener('click', async ()=>{
+        try{
+            const full = await backend.listSoulsFull();
+            const m={}; for(const so of full.souls) m[so.name]=true;
+            await backend.setSoulsEnabled(m); pushToast('ok','全部已启用'); refreshSouls();
+        }catch(e){ pushToast('fail', e.message); }
+    });
+    document.getElementById('arcextreme-souls-disable-all')?.addEventListener('click', async ()=>{
+        if(!confirm('确认禁用全部 Souls？将暂停所有记忆注入')) return;
+        try{
+            const full = await backend.listSoulsFull();
+            const m={}; for(const so of full.souls) m[so.name]=false;
+            await backend.setSoulsEnabled(m); pushToast('warn','全部已禁用'); refreshSouls();
+        }catch(e){ pushToast('fail', e.message); }
+    });
 }
 
 async function refreshStatus() {
@@ -1605,6 +1875,8 @@ function bindForm() {
     document.getElementById('arcextreme-long-prev')?.addEventListener('click', ()=>{ if(longPage>1){ longPage--; refreshEvents(); }});
     document.getElementById('arcextreme-long-next')?.addEventListener('click', ()=>{ longPage++; refreshEvents(); });
 
+    // 迁移 & Souls 批量
+    try{ setupMigrateUI(); }catch(e){ console.warn('[ArcEXtreme] migrate setup 失败', e); }
     // 弹出式大窗初始化
     try{
         const modal = document.getElementById('arcextreme-data-modal');

@@ -64,7 +64,7 @@ async function callSubAgentBatch(settings, batchItems, soulsContentMap, contextT
     for (let i=0;i<batchItems.length;i++) {
         const found = results.find(r=> Number(r.id)===i || Number(r.index)===i || r.event_id===batchItems[i].event_id);
         let action = found?.action || found?.act || 'Skip';
-        let why = String(found?.why || found?.reason || '').trim().slice(0,120);
+        let why = String(found?.why || found?.reason || '').trim().slice(0,300);
         if (action !== '+1' && action !== '-1' && action !== 'Skip') {
             const s = String(action).toLowerCase();
             if (s.includes('+1')||s.includes('inc')||s.includes('up')) action='+1';
@@ -95,7 +95,7 @@ async function callSubAgentSingle(settings, item, soulsContentMap, contextText, 
     ], { json:true, _traceStep:'subagent', _traceLabel: traceLabel || `SubAgent ${item.soul}#${item.event_id}` });
     const parsed = parseJson(raw) || {};
     let action = parsed.action || parsed.act || 'Skip';
-    let why = String(parsed.why || parsed.reason || '').trim().slice(0,120);
+    let why = String(parsed.why || parsed.reason || '').trim().slice(0,300);
     if (action !== '+1' && action !== '-1' && action !== 'Skip') {
         const s = String(action).toLowerCase();
         if (s.includes('+1')||s.includes('inc')||s.includes('up')) action='+1';

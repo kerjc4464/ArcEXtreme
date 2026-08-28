@@ -782,9 +782,14 @@
                 <div class="ax-tab-panel is-active" data-panel="souls">
                     <div class="ax-data-card">
                         <div class="ax-data-card__head">
-                            <span class="ax-data-card__title"><i class="fa-solid fa-ghost"></i> souls 列表</span>
-                            <div id="arcextreme-refresh-souls" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                            <span class="ax-data-card__title"><i class="fa-solid fa-ghost"></i> souls 列表 <small id="arcextreme-souls-summary" style="opacity:.6"></small></span>
+                            <div class="ax-data-card__actions" style="gap:4px">
+                                <div id="arcextreme-souls-enable-all" class="menu_button menu_button_icon ax-mini-btn" title="全部启用"><i class="fa-solid fa-check-double"></i></div>
+                                <div id="arcextreme-souls-disable-all" class="menu_button menu_button_icon ax-mini-btn" title="全部禁用"><i class="fa-solid fa-ban"></i></div>
+                                <div id="arcextreme-refresh-souls" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                            </div>
                         </div>
+                        <small class="ax-hint" style="margin:6px"><i class="fa-solid fa-toggle-on"></i> 勾选启用的 Soul 才会被提炼/裁判/检索/升华，禁用后历史数据保留但不参与。B方案持久化于后端 <code>souls/.souls_enabled.json</code></small>
                         <ul class="arcextreme-list ax-list" id="arcextreme-souls"></ul>
                     </div>
                 </div>
@@ -837,6 +842,84 @@
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Chat 迁移 & 备份 -->
+    <div class="inline-drawer ax-drawer" id="arcextreme-migrate-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-right-left"></i> 聊天迁移 & 备份 <span class="ax-badge ax-badge--accent">Chat Migrate</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <small class="ax-hint" style="margin:4px 0"><i class="fa-solid fa-triangle-exclamation"></i> 当前为 <b>按 chat_id 强隔离</b> 单库多租户；聊天删档/损坏即孤岛。本面板提供 <code>复制(默认保留源)</code> / <code>移动</code> + 独立备份工具，允许重复追加。</small>
+            <div class="ax-data-card" style="margin-top:8px">
+                <div class="ax-data-card__head">
+                    <span class="ax-data-card__title"><i class="fa-solid fa-comments"></i> 聊天清单 <small id="arcextreme-chats-summary" style="opacity:.6"></small></span>
+                    <div class="ax-data-card__actions">
+                        <div id="arcextreme-refresh-chats" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                        <div id="arcextreme-chats-delete-tool" class="menu_button menu_button_icon ax-mini-btn ax-mini-btn--danger" title="单做工具：删除选中聊天（谨慎）"><i class="fa-solid fa-trash-can"></i></div>
+                    </div>
+                </div>
+                <div style="max-height:240px; overflow:auto; border:1px solid var(--ax-border); border-radius:8px;">
+                    <table class="ax-table" id="arcextreme-chats-table" style="width:100%; font-size:12px">
+                        <thead><tr><th style="width:28px"><input type="checkbox" id="arcextreme-chats-select-all"></th><th>chat_id</th><th>事件</th><th>池</th><th>升华</th><th>魂</th><th>更新</th></tr></thead>
+                        <tbody id="arcextreme-chats-tbody"><tr><td colspan="7" style="text-align:center; opacity:.6; padding:12px">点击刷新载入</td></tr></tbody>
+                    </table>
+                </div>
+                <small class="ax-hint">表按最近更新倒序；勾选一行作为源，目标可填当前或任意 chat_id。</small>
+            </div>
+            <div class="ax-grid ax-grid--2" style="margin-top:10px">
+                <div class="flex-container flexFlowColumn">
+                    <label><small>源 chat_id（勾选自动填）</small></label>
+                    <input type="text" id="arcextreme-migrate-source" class="text_pole" placeholder="选择上方行或粘贴 chat_id" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label><small>目标 chat_id</small></label>
+                    <div class="flex-container">
+                        <input type="text" id="arcextreme-migrate-target" class="text_pole flex1" placeholder="默认：当前聊天" />
+                        <div id="arcextreme-migrate-target-current" class="menu_button menu_button_icon" title="填入当前聊天"><i class="fa-solid fa-crosshairs"></i></div>
+                    </div>
+                </div>
+            </div>
+            <div class="flex-container" style="gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center">
+                <label class="checkbox_label" style="gap:4px"><input type="radio" name="arcextreme-migrate-mode" value="copy" checked> <span><i class="fa-solid fa-copy"></i> 复制(保留源)</span></label>
+                <label class="checkbox_label" style="gap:4px"><input type="radio" name="arcextreme-migrate-mode" value="move"> <span style="color:#ef4444"><i class="fa-solid fa-truck"></i> 移动(删源)</span></label>
+                <span style="opacity:.5">|</span>
+                <label class="checkbox_label"><input type="checkbox" id="arcextreme-migrate-overwrite"> <span>覆盖目标(先清)</span></label>
+            </div>
+            <div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; align-items:center">
+                <div id="arcextreme-migrate-do-copy" class="menu_button menu_button_icon" style="background:linear-gradient(135deg,#8b7cf6,#5eead4); color:#fff; border:none"><i class="fa-solid fa-copy"></i> 复制</div>
+                <div id="arcextreme-migrate-do-move" class="menu_button menu_button_icon" style="border:1px solid #ef4444; color:#ef4444"><i class="fa-solid fa-truck-ramp-box"></i> 移动</div>
+                <span style="flex:1"></span>
+                <small id="arcextreme-migrate-status" style="opacity:.7"></small>
+            </div>
+            <hr style="border-color:var(--ax-border); margin:12px 0">
+            <div class="ax-data-card">
+                <div class="ax-data-card__head">
+                    <span class="ax-data-card__title"><i class="fa-solid fa-floppy-disk"></i> 备份 & 导入 <small style="opacity:.5">JSON 全量（含向量）</small></span>
+                </div>
+                <div class="ax-grid ax-grid--2" style="padding:8px">
+                    <div class="flex-container flexFlowColumn">
+                        <label><small>导出当前/指定 chat</small></label>
+                        <div class="flex-container">
+                            <input type="text" id="arcextreme-export-chat" class="text_pole flex1" placeholder="留空=当前聊天" />
+                            <div id="arcextreme-export-do" class="menu_button menu_button_icon" title="导出并下载"><i class="fa-solid fa-download"></i> 导出</div>
+                        </div>
+                        <small class="ax-hint">含 events/state/pool/sublimated + 向量 b64</small>
+                    </div>
+                    <div class="flex-container flexFlowColumn">
+                        <label><small>导入 JSON 到目标 chat</small></label>
+                        <div class="flex-container">
+                            <input type="file" id="arcextreme-import-file" accept=".json" class="text_pole flex1" />
+                            <input type="text" id="arcextreme-import-target" class="text_pole" placeholder="目标 chat_id" style="width:140px" />
+                            <div id="arcextreme-import-do" class="menu_button menu_button_icon" title="导入"><i class="fa-solid fa-upload"></i> 导入</div>
+                        </div>
+                        <label class="checkbox_label" style="margin-top:4px"><input type="checkbox" id="arcextreme-import-overwrite"> <span>覆盖导入</span></label>
+                    </div>
+                </div>
+            </div>
+            <small class="ax-hint"><i class="fa-solid fa-circle-info"></i> 默认允许重复追加；移动/删除属单做工具，需二次确认。</small>
         </div>
     </div>
 

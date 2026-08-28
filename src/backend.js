@@ -54,23 +54,40 @@ async function apiDelete(path) {
     return res.json();
 }
 
+function isValidChatId(id){
+    const s = String(id||'').trim();
+    return !!s && s !== 'undefined' && s !== 'null' && s !== 'false';
+}
 export const backend = {
     status: () => apiGet('/api/status'),
     listSouls: async () => (await apiGet('/api/souls')).souls,
+    listSoulsFull: () => apiGet('/api/souls'),
+    getSoulsEnabled: () => apiGet('/api/souls/enabled').then(d=>d.enabled||{}),
+    setSoulsEnabled: (enabledMap) => apiPost('/api/souls/enabled', {enabled: enabledMap}),
     getSoul: (filename) => fetch(`${baseUrl()}/api/souls/${encodeURIComponent(filename)}`).then(r => {
         if (!r.ok) throw new Error(`soul ${filename} -> ${r.status}`);
         return r.text();
     }),
-    insertEvent: (payload) => apiPost('/api/events/insert', payload),
+    insertEvent: (payload) => {
+        if (!isValidChatId(payload?.chat_id)) return Promise.reject(new Error('chat_id 无效，跳过插入'));
+        return apiPost('/api/events/insert', payload);
+    },
     insertBatch: (chatId, events, perSoulCap) => {
+        if (!isValidChatId(chatId)) return Promise.reject(new Error('chat_id 无效，跳过批量插入'));
         const body = { chat_id: chatId, events };
         if (perSoulCap != null) body.perSoulCap = perSoulCap;
         return apiPost('/api/events/insert_batch', body);
     },
-    recentEvents: (chatId, days) => apiGet(`/api/events/recent?chat_id=${encodeURIComponent(chatId)}&days=${days}`).then(d => d.events),
-    queryEvents: (chatId, vector, buckets, souls, k, weightMultipliers) =>
-        apiPost('/api/events/query', { chat_id: chatId, vector, buckets, souls, k, weightMultipliers }).then(d => d.results),
+    recentEvents: (chatId, days) => {
+        if (!isValidChatId(chatId)) return Promise.resolve([]);
+        return apiGet(`/api/events/recent?chat_id=${encodeURIComponent(chatId)}&days=${days}`).then(d => d.events);
+    },
+    queryEvents: (chatId, vector, buckets, souls, k, weightMultipliers) => {
+        if (!isValidChatId(chatId)) return Promise.resolve([]);
+        return apiPost('/api/events/query', { chat_id: chatId, vector, buckets, souls, k, weightMultipliers }).then(d => d.results);
+    },
     listEvents: (chatId, opts={}) => {
+        if (!isValidChatId(chatId)) return Promise.resolve([]);
         const p = new URLSearchParams({ chat_id: chatId });
         if (opts.withCounters) p.set('with_counters','1');
         if (opts.soul) p.set('soul', opts.soul);
@@ -80,31 +97,72 @@ export const backend = {
         if (opts.offset) p.set('offset', String(opts.offset));
         return apiGet(`/api/events?${p.toString()}`).then(d => d.events);
     },
-    clearEvents: (chatId) => apiPost('/api/events/clear', { chat_id: chatId }),
+    clearEvents: (chatId) => {
+        if (!isValidChatId(chatId)) return Promise.reject(new Error('chat_id 无效'));
+        return apiPost('/api/events/clear', { chat_id: chatId });
+    },
     deleteEvent: (id) => apiDelete(`/api/events/${id}`),
     reload: () => apiPost('/api/reload', {}),
     // 短期池
     getShortPool: (chatId, soul, perSoulCap) => {
+        if (!isValidChatId(chatId)) return Promise.resolve({pools:{}, events:[], count:0});
         const p = new URLSearchParams({ chat_id: chatId });
         if (soul) p.set('soul', soul);
         if (perSoulCap != null) p.set('perSoulCap', String(perSoulCap));
         return apiGet(`/api/short_pool?${p.toString()}`);
     },
-    syncShortPool: (chatId, evaluations) => apiPost('/api/short_pool/sync', { chat_id: chatId, evaluations }),
-    prepareShortPool: (chatId, perSoulCap, skipThreshold, needVacancies) => apiPost('/api/short_pool/prepare', { chat_id: chatId, perSoulCap, skipThreshold, needVacancies }),
+    syncShortPool: (chatId, evaluations) => {
+        if (!isValidChatId(chatId)) return Promise.resolve({updated:[], count:0});
+        return apiPost('/api/short_pool/sync', { chat_id: chatId, evaluations });
+    },
+    prepareShortPool: (chatId, perSoulCap, skipThreshold, needVacancies) => {
+        if (!isValidChatId(chatId)) return Promise.resolve({freed:[], vacancies:{}, count:0});
+        return apiPost('/api/short_pool/prepare', { chat_id: chatId, perSoulCap, skipThreshold, needVacancies });
+    },
     fillShortPool: (chatId, items, perSoulCap) => {
+        if (!isValidChatId(chatId)) return Promise.resolve({added:[], count:0});
         const body = { chat_id: chatId, items };
         if (perSoulCap != null) body.perSoulCap = perSoulCap;
         return apiPost('/api/short_pool/fill', body);
     },
-    enforceShortPool: (chatId, perSoulCap) => apiPost('/api/short_pool/enforce', { chat_id: chatId, perSoulCap }),
-    checkSublimation: (chatId, stuckThreshold) => apiGet(`/api/short_pool/check_sublimation?chat_id=${encodeURIComponent(chatId)}&stuckThreshold=${stuckThreshold||8}`),
+    enforceShortPool: (chatId, perSoulCap) => {
+        if (!isValidChatId(chatId)) return Promise.resolve({ok:true, before:{}, after:{}});
+        return apiPost('/api/short_pool/enforce', { chat_id: chatId, perSoulCap });
+    },
+    checkSublimation: (chatId, stuckThreshold) => {
+        if (!isValidChatId(chatId)) return Promise.resolve({candidates:[], count:0});
+        return apiGet(`/api/short_pool/check_sublimation?chat_id=${encodeURIComponent(chatId)}&stuckThreshold=${stuckThreshold||8}`);
+    },
     markSublimated: (payload) => apiPost('/api/short_pool/mark_sublimated', payload),
     // soul追加 & 升华记录
     appendSoul: (payload) => apiPost('/api/souls/append', payload),
     listSublimated: (chatId, soul) => {
+        if (!isValidChatId(chatId)) return Promise.resolve([]);
         const p = new URLSearchParams({ chat_id: chatId });
         if (soul) p.set('soul', soul);
         return apiGet(`/api/sublimated?${p.toString()}`).then(d=>d.items||[]);
+    },
+    // chats 迁移 & 备份
+    listChats: () => apiGet('/api/chats'),
+    chatStats: (chatId) => {
+        if (!isValidChatId(chatId)) return Promise.reject(new Error('chat_id 无效'));
+        return apiGet(`/api/chats/${encodeURIComponent(chatId)}/stats`);
+    },
+    migrateChat: (payload) => {
+        if (!isValidChatId(payload?.source_chat_id) || !isValidChatId(payload?.target_chat_id)) return Promise.reject(new Error('source/target chat_id 无效'));
+        return apiPost('/api/chats/migrate', payload);
+    },
+    renameChat: (payload) => apiPost('/api/chats/rename', payload),
+    deleteChat: (chatId) => {
+        if (!isValidChatId(chatId)) return Promise.reject(new Error('chat_id 无效'));
+        return apiDelete(`/api/chats/${encodeURIComponent(chatId)}`);
+    },
+    exportChat: (chatId) => {
+        if (!isValidChatId(chatId)) return Promise.reject(new Error('chat_id 无效'));
+        return apiGet(`/api/export?chat_id=${encodeURIComponent(chatId)}`);
+    },
+    importChat: (payload) => {
+        if (!isValidChatId(payload?.chat_id || payload?.target_chat_id)) return Promise.reject(new Error('chat_id 无效'));
+        return apiPost('/api/import', payload);
     },
 };

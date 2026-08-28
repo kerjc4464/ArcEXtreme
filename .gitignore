@@ -18,3 +18,5 @@ Thumbs.db
 # Local
 arcextreme.db
 souls/*.tmp
+souls/.souls_enabled.json
+ArcEXtreme-BackEnd/souls/.souls_enabled.json

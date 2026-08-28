@@ -4,6 +4,8 @@ import sqlite3
 import ipaddress
 import urllib.parse
 import threading
+import json as _json
+import base64
 import numpy as np
 from typing import List, Optional, Any, Dict
 
@@ -43,6 +45,8 @@ SOUL_EXTS = (".md", ".txt", ".json", ".yaml", ".yml")
 ALLOWED_PRIVATE_HOSTS = {'127.0.0.1', 'localhost', '::1', 'host.docker.internal'}
 
 soul_lock = threading.Lock()
+SOULS_ENABLED_PATH = os.path.join(SOULS_DIR, ".souls_enabled.json")
+migrate_lock = threading.Lock()
 
 def _is_private_url(url: str) -> bool:
     try:
@@ -283,15 +287,41 @@ def load_index():
     vecs = []
     faiss_ids = []
     for r in rows:
-        v = blob_to_vector(r["vector"])
-        vecs.append(v)
-        faiss_ids.append(r["id"])
+        try:
+            v = blob_to_vector(r["vector"])
+            if not v or not isinstance(v, list) or len(v)==0:
+                continue
+            vecs.append(v)
+            faiss_ids.append(r["id"])
+        except: pass
     if not vecs:
         return
+    # handle mixed dims: group by dim, pick majority
+    from collections import Counter
+    dims = Counter(len(v) for v in vecs)
+    dim_major, _ = dims.most_common(1)[0]
+    if len(dims) > 1:
+        print(f"[load_index] mixed dims detected {dict(dims)}, using majority {dim_major}, skipping {len(vecs)-dims[dim_major]} vectors")
+        filtered = []
+        fids = []
+        for v, fid in zip(vecs, faiss_ids):
+            if len(v)==dim_major:
+                filtered.append(v)
+                fids.append(fid)
+        vecs, faiss_ids = filtered, fids
+        if not vecs:
+            return
     dim = len(vecs[0])
-    ensure_index(dim)
-    arr = np.asarray(vecs, dtype=np.float32)
-    faiss_index.add(arr)
+    try:
+        ensure_index(dim)
+    except Exception as e:
+        print(f"[load_index] ensure_index failed dim {dim}: {e}")
+        return
+    try:
+        arr = np.asarray(vecs, dtype=np.float32)
+        faiss_index.add(arr)
+    except Exception as e:
+        print(f"[load_index] add failed: {e}")
 
 def age_days(ts_ms: float) -> float:
     return (time.time() * 1000 - ts_ms) / 86400000.0
@@ -472,10 +502,35 @@ def safe_soul_path(filename: str):
         raise HTTPException(400, "非法文件名")
     return full
 
+def _load_enabled_map():
+    try:
+        if os.path.isfile(SOULS_ENABLED_PATH):
+            with open(SOULS_ENABLED_PATH, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+                if isinstance(data, dict):
+                    return {str(k): bool(v) for k, v in data.items()}
+    except Exception as e:
+        print(f"[souls_enabled] load failed: {e}")
+    return {}
+
+def _save_enabled_map(m):
+    try:
+        with soul_lock:
+            tmp = SOULS_ENABLED_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(m, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, SOULS_ENABLED_PATH)
+    except Exception as e:
+        print(f"[souls_enabled] save failed: {e}")
+        raise
+
 @app.get("/api/souls")
 def list_souls():
+    enabled_map = _load_enabled_map()
     items = []
     for fn in sorted(os.listdir(SOULS_DIR)):
+        if fn.startswith("."):
+            continue
         if fn.lower().endswith(SOUL_EXTS):
             full = os.path.join(SOULS_DIR, fn)
             try:
@@ -484,14 +539,50 @@ def list_souls():
             except OSError:
                 size = 0
                 mtime = 0
+            name = os.path.splitext(fn)[0]
+            enabled = enabled_map.get(name, True) if enabled_map else True
+            # if map empty, all enabled; otherwise missing key defaults to True
+            if name not in enabled_map and enabled_map:
+                enabled = True
             items.append({
-                "name": os.path.splitext(fn)[0],
+                "name": name,
                 "filename": fn,
                 "format": os.path.splitext(fn)[1].lstrip("."),
                 "size_bytes": size,
                 "modified_at": mtime,
+                "enabled": enabled,
             })
-    return {"souls": items}
+    return {"souls": items, "enabled_map": enabled_map}
+
+@app.get("/api/souls/enabled")
+def get_souls_enabled():
+    return {"enabled": _load_enabled_map()}
+
+@app.post("/api/souls/enabled")
+def set_souls_enabled(payload: Dict[str, Any]):
+    # payload {enabled: {name: bool}} or direct map
+    m = None
+    if isinstance(payload.get("enabled"), dict):
+        m = payload["enabled"]
+    elif isinstance(payload, dict) and all(isinstance(v, bool) for v in payload.values()):
+        m = payload
+    else:
+        # try to find any dict
+        for v in payload.values():
+            if isinstance(v, dict):
+                m = v
+                break
+    if m is None:
+        raise HTTPException(400, "missing enabled map")
+    # normalize and validate names exist (allow any, but clean)
+    norm = {}
+    for k, v in m.items():
+        nk = str(k).strip()
+        if not nk:
+            continue
+        norm[nk] = bool(v)
+    _save_enabled_map(norm)
+    return {"ok": True, "enabled": norm}
 
 @app.get("/api/souls/{filename}")
 def read_soul(filename: str):
@@ -537,6 +628,493 @@ def list_sublimated(chat_id: str, soul: Optional[str]=None):
         rows = conn.execute("SELECT * FROM sublimated WHERE chat_id=? ORDER BY created_at DESC", (chat_id,)).fetchall()
     conn.close()
     return {"items": [dict(r) for r in rows]}
+
+# --------------------------------------------------------------------------- #
+# Chats — 枚举、统计、迁移、备份
+# --------------------------------------------------------------------------- #
+def _list_all_chat_ids(conn):
+    chat_ids = set()
+    for tbl, col in [("events","chat_id"), ("event_soul_state","chat_id"), ("short_pool","chat_id"), ("sublimated","chat_id")]:
+        try:
+            rows = conn.execute(f"SELECT DISTINCT {col} FROM {tbl} WHERE {col} IS NOT NULL").fetchall()
+            for r in rows:
+                v = r[col]
+                if v and str(v).strip():
+                    chat_ids.add(str(v))
+        except Exception:
+            pass
+    return chat_ids
+
+@app.get("/api/chats")
+def list_chats():
+    conn = get_db()
+    chat_ids = _list_all_chat_ids(conn)
+    out = []
+    for cid in sorted(chat_ids):
+        try:
+            ev_cnt = conn.execute("SELECT COUNT(*) as c FROM events WHERE chat_id=?", (cid,)).fetchone()["c"]
+        except: ev_cnt = 0
+        try:
+            pool_cnt = conn.execute("SELECT COUNT(*) as c FROM short_pool WHERE chat_id=?", (cid,)).fetchone()["c"]
+        except: pool_cnt = 0
+        try:
+            sub_cnt = conn.execute("SELECT COUNT(*) as c FROM sublimated WHERE chat_id=?", (cid,)).fetchone()["c"]
+        except: sub_cnt = 0
+        try:
+            state_cnt = conn.execute("SELECT COUNT(*) as c FROM event_soul_state WHERE chat_id=?", (cid,)).fetchone()["c"]
+        except: state_cnt = 0
+        try:
+            row = conn.execute("SELECT MIN(timestamp) as mn, MAX(timestamp) as mx FROM events WHERE chat_id=?", (cid,)).fetchone()
+            mn = row["mn"] if row else None
+            mx = row["mx"] if row else None
+        except: mn, mx = None, None
+        try:
+            souls_rows = conn.execute("SELECT DISTINCT soul FROM event_soul_state WHERE chat_id=?", (cid,)).fetchall()
+            souls = [r["soul"] for r in souls_rows if r["soul"]]
+        except: souls = []
+        out.append({
+            "chat_id": cid,
+            "events": ev_cnt,
+            "state": state_cnt,
+            "short_pool": pool_cnt,
+            "sublimated": sub_cnt,
+            "souls": souls,
+            "min_ts": mn,
+            "max_ts": mx,
+        })
+    conn.close()
+    out.sort(key=lambda x: (x["max_ts"] or 0), reverse=True)
+    return {"chats": out, "count": len(out)}
+
+@app.get("/api/chats/{chat_id}/stats")
+def chat_stats(chat_id: str):
+    conn = get_db()
+    try:
+        ev_cnt = conn.execute("SELECT COUNT(*) as c FROM events WHERE chat_id=?", (chat_id,)).fetchone()["c"]
+    except: ev_cnt = 0
+    try:
+        pool_cnt = conn.execute("SELECT COUNT(*) as c FROM short_pool WHERE chat_id=?", (chat_id,)).fetchone()["c"]
+    except: pool_cnt = 0
+    try:
+        sub_cnt = conn.execute("SELECT COUNT(*) as c FROM sublimated WHERE chat_id=?", (chat_id,)).fetchone()["c"]
+    except: sub_cnt = 0
+    try:
+        state_cnt = conn.execute("SELECT COUNT(*) as c FROM event_soul_state WHERE chat_id=?", (chat_id,)).fetchone()["c"]
+    except: state_cnt = 0
+    try:
+        rows = conn.execute("SELECT time_bucket, COUNT(*) as c FROM events WHERE chat_id=? GROUP BY time_bucket", (chat_id,)).fetchall()
+        buckets = {r["time_bucket"]: r["c"] for r in rows}
+    except: buckets = {}
+    try:
+        rows2 = conn.execute("SELECT soul, COUNT(*) as c FROM event_soul_state WHERE chat_id=? GROUP BY soul", (chat_id,)).fetchall()
+        per_soul = {r["soul"]: r["c"] for r in rows2}
+    except: per_soul = {}
+    try:
+        latest = conn.execute("SELECT event_text, timestamp, souls FROM events WHERE chat_id=? ORDER BY timestamp DESC LIMIT 5", (chat_id,)).fetchall()
+        latest = [dict(r) for r in latest]
+    except: latest = []
+    conn.close()
+    return {"chat_id": chat_id, "events": ev_cnt, "state": state_cnt, "short_pool": pool_cnt, "sublimated": sub_cnt, "buckets": buckets, "per_soul": per_soul, "latest": latest}
+
+class ChatMigratePayload(BaseModel):
+    source_chat_id: str
+    target_chat_id: str
+    mode: str = "copy"  # copy | move | merge (merge == copy append)
+    overwrite: bool = False
+    include_events: bool = True
+    include_state: bool = True
+    include_pool: bool = True
+    include_sublimated: bool = True
+
+@app.post("/api/chats/migrate")
+def migrate_chat(payload: ChatMigratePayload):
+    global faiss_index, faiss_dim, faiss_ids
+    src = str(payload.source_chat_id or "").strip()
+    dst = str(payload.target_chat_id or "").strip()
+    if not src or not dst:
+        raise HTTPException(400, "source_chat_id 与 target_chat_id 均必填")
+    if src == dst:
+        raise HTTPException(400, "源与目标不能相同")
+    mode = str(payload.mode or "copy").lower()
+    if mode not in ("copy","move","merge"):
+        mode = "copy"
+    # merge is alias of copy append
+    with migrate_lock:
+        conn = get_db()
+        # verify source exists
+        src_exists = False
+        try:
+            for tbl in ["events","event_soul_state","short_pool","sublimated"]:
+                cnt = conn.execute(f"SELECT COUNT(*) as c FROM {tbl} WHERE chat_id=?", (src,)).fetchone()["c"]
+                if cnt and cnt>0:
+                    src_exists = True
+                    break
+        except Exception as e:
+            conn.close()
+            raise HTTPException(500, f"源检测失败: {e}")
+        if not src_exists:
+            conn.close()
+            raise HTTPException(404, f"源 chat_id 无数据: {src}")
+        # if overwrite and dst exists, clear dst first
+        if payload.overwrite:
+            try:
+                conn.execute("DELETE FROM short_pool WHERE chat_id=?", (dst,))
+                conn.execute("DELETE FROM event_soul_state WHERE chat_id=?", (dst,))
+                conn.execute("DELETE FROM sublimated WHERE chat_id=?", (dst,))
+                conn.execute("DELETE FROM events WHERE chat_id=?", (dst,))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                conn.close()
+                raise HTTPException(500, f"覆盖清空失败: {e}")
+        # counters
+        stats = {"events":0, "state":0, "pool":0, "sublimated":0, "faiss_added":0}
+        id_map = {}  # old_event_id -> new_event_id
+        try:
+            # ---- events ----
+            if payload.include_events:
+                old_events = conn.execute("SELECT * FROM events WHERE chat_id=? ORDER BY id", (src,)).fetchall()
+                for r in old_events:
+                    d = dict(r)
+                    old_id = d["id"]
+                    # build insert; keep vector blob verbatim
+                    cols = ["chat_id","timestamp","time_bucket","role1","role2","souls","event_text","vector","metadata","created_at","last_active_at","counter"]
+                    vals = []
+                    for c in cols:
+                        if c == "chat_id":
+                            vals.append(dst)
+                        else:
+                            vals.append(d.get(c))
+                    placeholders = ",".join(["?"]*len(cols))
+                    cur = conn.execute(f"INSERT INTO events ({','.join(cols)}) VALUES ({placeholders})", tuple(vals))
+                    new_id = cur.lastrowid
+                    id_map[old_id] = new_id
+                    stats["events"] += 1
+                conn.commit()
+                # add to faiss after commit
+                if id_map:
+                    try:
+                        # batch add vectors for new ids
+                        vec_rows = conn.execute(f"SELECT id, vector FROM events WHERE chat_id=? AND vector IS NOT NULL", (dst,)).fetchall()
+                        # but we only want newly inserted; use id_map values
+                        new_ids_set = set(id_map.values())
+                        vecs = []
+                        ids_added = []
+                        for vr in vec_rows:
+                            if vr["id"] in new_ids_set and vr["vector"] is not None:
+                                try:
+                                    v = blob_to_vector(vr["vector"])
+                                    if v and len(v)>0:
+                                        vecs.append(v)
+                                        ids_added.append(vr["id"])
+                                except: pass
+                        if vecs:
+                            # ensure dim matches or init
+                            dim = len(vecs[0])
+                            try:
+                                ensure_index(dim)
+                            except Exception as e:
+                                print(f"[migrate] ensure_index dim {dim} failed: {e}")
+                            # add directly
+                            if faiss_index is not None:
+                                try:
+                                    arr = np.asarray(vecs, dtype=np.float32)
+                                    faiss_index.add(arr)
+                                    faiss_ids.extend(ids_added)
+                                    stats["faiss_added"] = len(ids_added)
+                                except Exception as e:
+                                    print(f"[migrate] faiss add failed: {e}")
+                                    # fallback reload
+                                    try:
+                                        load_index()
+                                    except: pass
+                    except Exception as e:
+                        print(f"[migrate] faiss batch failed: {e}")
+            # ---- event_soul_state ----
+            if payload.include_state:
+                # if we copied events, map old->new; else keep old ids but change chat_id (for pool-only migrate)
+                if id_map:
+                    old_states = conn.execute("SELECT * FROM event_soul_state WHERE chat_id=?", (src,)).fetchall()
+                    for rs in old_states:
+                        ds = dict(rs)
+                        old_eid = ds["event_id"]
+                        new_eid = id_map.get(old_eid)
+                        if new_eid is None:
+                            # event not copied? skip or still copy with old id? we skip
+                            continue
+                        # insert copy with dst chat_id and new event_id
+                        conn.execute("INSERT OR REPLACE INTO event_soul_state(event_id,chat_id,soul,counter,skip,stuck,birth_ts,last_eval,why_init,why_log) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (new_eid, dst, ds["soul"], ds["counter"], ds["skip"], ds["stuck"], ds["birth_ts"], ds["last_eval"], ds.get("why_init"), ds.get("why_log")))
+                        stats["state"] += 1
+                else:
+                    # no event copy, duplicating state referencing existing events? then just copy rows changing chat_id keeping same event_id
+                    old_states = conn.execute("SELECT * FROM event_soul_state WHERE chat_id=?", (src,)).fetchall()
+                    for rs in old_states:
+                        ds = dict(rs)
+                        conn.execute("INSERT OR REPLACE INTO event_soul_state(event_id,chat_id,soul,counter,skip,stuck,birth_ts,last_eval,why_init,why_log) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (ds["event_id"], dst, ds["soul"], ds["counter"], ds["skip"], ds["stuck"], ds["birth_ts"], ds["last_eval"], ds.get("why_init"), ds.get("why_log")))
+                        stats["state"] += 1
+                conn.commit()
+            # ---- short_pool ----
+            if payload.include_pool:
+                if id_map:
+                    old_pools = conn.execute("SELECT * FROM short_pool WHERE chat_id=?", (src,)).fetchall()
+                    for rp in old_pools:
+                        dp = dict(rp)
+                        old_eid = dp["event_id"]
+                        new_eid = id_map.get(old_eid)
+                        if new_eid is None:
+                            continue
+                        conn.execute("INSERT OR IGNORE INTO short_pool(chat_id,soul,event_id) VALUES (?,?,?)", (dst, dp["soul"], new_eid))
+                        stats["pool"] += 1
+                else:
+                    old_pools = conn.execute("SELECT * FROM short_pool WHERE chat_id=?", (src,)).fetchall()
+                    for rp in old_pools:
+                        dp = dict(rp)
+                        conn.execute("INSERT OR IGNORE INTO short_pool(chat_id,soul,event_id) VALUES (?,?,?)", (dst, dp["soul"], dp["event_id"]))
+                        stats["pool"] += 1
+                conn.commit()
+                # enforce cap for dst
+                try:
+                    # use default 15 or max existing? just 15
+                    _enforce_cap(dst, 15)
+                except: pass
+            # ---- sublimated ----
+            if payload.include_sublimated:
+                old_subs = conn.execute("SELECT * FROM sublimated WHERE chat_id=?", (src,)).fetchall()
+                for rs in old_subs:
+                    ds = dict(rs)
+                    # map event_id if possible
+                    old_eid = ds.get("event_id")
+                    new_eid = id_map.get(old_eid) if old_eid else None
+                    conn.execute("INSERT INTO sublimated(chat_id,soul,event_id,counter,title,content,created_at) VALUES (?,?,?,?,?,?,?)",
+                        (dst, ds["soul"], new_eid if new_eid is not None else old_eid, ds["counter"], ds["title"], ds["content"], ds["created_at"]))
+                    stats["sublimated"] += 1
+                conn.commit()
+            # ---- move mode: delete source ----
+            if mode == "move":
+                conn.execute("DELETE FROM short_pool WHERE chat_id=?", (src,))
+                conn.execute("DELETE FROM event_soul_state WHERE chat_id=?", (src,))
+                conn.execute("DELETE FROM sublimated WHERE chat_id=?", (src,))
+                conn.execute("DELETE FROM events WHERE chat_id=?", (src,))
+                conn.commit()
+                # FAISS rebuild needed after delete to remove stale vectors
+                try:
+                    faiss_index = None
+                    faiss_dim = None
+                    faiss_ids = []
+                    load_index()
+                except Exception as e:
+                    print(f"[migrate move] reload faiss failed: {e}")
+            conn.close()
+        except HTTPException:
+            raise
+        except Exception as e:
+            try: conn.rollback(); conn.close()
+            except: pass
+            # attempt faiss reload on error
+            try:
+                faiss_index = None
+                faiss_dim = None
+                faiss_ids = []
+                load_index()
+            except: pass
+            raise HTTPException(500, f"迁移失败: {e}")
+        return {"ok": True, "mode": mode, "source": src, "target": dst, "stats": stats, "id_map_size": len(id_map)}
+
+@app.post("/api/chats/rename")
+def rename_chat(payload: Dict[str, Any]):
+    src = str(payload.get("source_chat_id") or payload.get("source") or payload.get("from") or "").strip()
+    dst = str(payload.get("target_chat_id") or payload.get("target") or payload.get("to") or "").strip()
+    if not src or not dst:
+        raise HTTPException(400, "source 与 target 必填")
+    if src == dst:
+        raise HTTPException(400, "源与目标相同")
+    with migrate_lock:
+        conn = get_db()
+        cnt = conn.execute("SELECT COUNT(*) as c FROM events WHERE chat_id=?", (src,)).fetchone()["c"]
+        if not cnt:
+            # also check other tables
+            cnt2 = conn.execute("SELECT COUNT(*) as c FROM sublimated WHERE chat_id=?", (src,)).fetchone()["c"]
+            if not cnt2:
+                conn.close()
+                raise HTTPException(404, "源无数据")
+        # if target exists and not allowed, error
+        tc = conn.execute("SELECT COUNT(*) as c FROM events WHERE chat_id=?", (dst,)).fetchone()["c"]
+        if tc and tc>0:
+            conn.close()
+            raise HTTPException(409, "目标已存在，请用 migrate+overwrite 或先清理")
+        try:
+            conn.execute("UPDATE events SET chat_id=? WHERE chat_id=?", (dst, src))
+            conn.execute("UPDATE event_soul_state SET chat_id=? WHERE chat_id=?", (dst, src))
+            conn.execute("UPDATE short_pool SET chat_id=? WHERE chat_id=?", (dst, src))
+            conn.execute("UPDATE sublimated SET chat_id=? WHERE chat_id=?", (dst, src))
+            conn.commit()
+            conn.close()
+            # FAISS ids don't change, but chat_id filter will, so no rebuild needed; but reload to be safe
+            try:
+                global faiss_index, faiss_ids, faiss_dim
+                # we keep index, just ids unchanged
+                pass
+            except: pass
+            return {"ok": True, "from": src, "to": dst}
+        except Exception as e:
+            try: conn.rollback(); conn.close()
+            except: pass
+            raise HTTPException(500, f"重命名失败: {e}")
+
+@app.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: str):
+    global faiss_index, faiss_dim, faiss_ids
+    with migrate_lock:
+        conn = get_db()
+        conn.execute("DELETE FROM short_pool WHERE chat_id=?", (chat_id,))
+        conn.execute("DELETE FROM event_soul_state WHERE chat_id=?", (chat_id,))
+        conn.execute("DELETE FROM sublimated WHERE chat_id=?", (chat_id,))
+        conn.execute("DELETE FROM events WHERE chat_id=?", (chat_id,))
+        conn.commit()
+        conn.close()
+        # rebuild FAISS
+        try:
+            faiss_index = None
+            faiss_dim = None
+            faiss_ids = []
+            load_index()
+        except Exception as e:
+            print(f"[delete_chat] faiss reload failed: {e}")
+        return {"ok": True, "deleted": chat_id}
+
+@app.get("/api/export")
+def export_chat(chat_id: str):
+    conn = get_db()
+    events = [dict(r) for r in conn.execute("SELECT * FROM events WHERE chat_id=? ORDER BY id", (chat_id,)).fetchall()]
+    states = [dict(r) for r in conn.execute("SELECT * FROM event_soul_state WHERE chat_id=?", (chat_id,)).fetchall()]
+    pools = [dict(r) for r in conn.execute("SELECT * FROM short_pool WHERE chat_id=?", (chat_id,)).fetchall()]
+    subs = [dict(r) for r in conn.execute("SELECT * FROM sublimated WHERE chat_id=?", (chat_id,)).fetchall()]
+    conn.close()
+    # encode vectors as list for portability; also keep base64
+    for ev in events:
+        blob = ev.get("vector")
+        if blob is not None:
+            try:
+                v = blob_to_vector(blob)
+                ev["vector"] = v
+                ev["vector_b64"] = base64.b64encode(blob).decode("ascii")
+            except:
+                ev["vector"] = None
+                ev["vector_b64"] = None
+        # remove blob bytes
+        if isinstance(ev.get("vector"), bytes):
+            ev["vector"] = None
+    return {"chat_id": chat_id, "exported_at": time.time()*1000, "counts": {"events": len(events), "state": len(states), "pool": len(pools), "sublimated": len(subs)}, "events": events, "states": states, "pools": pools, "sublimated": subs}
+
+@app.post("/api/import")
+def import_chat(payload: Dict[str, Any]):
+    global faiss_index, faiss_dim, faiss_ids
+    chat_id = str(payload.get("chat_id") or payload.get("target_chat_id") or "").strip()
+    if not chat_id:
+        raise HTTPException(400, "chat_id 必填")
+    overwrite = bool(payload.get("overwrite"))
+    events = payload.get("events") or []
+    states = payload.get("states") or []
+    pools = payload.get("pools") or []
+    subs = payload.get("sublimated") or payload.get("sub") or []
+    with migrate_lock:
+        conn = get_db()
+        if overwrite:
+            conn.execute("DELETE FROM short_pool WHERE chat_id=?", (chat_id,))
+            conn.execute("DELETE FROM event_soul_state WHERE chat_id=?", (chat_id,))
+            conn.execute("DELETE FROM sublimated WHERE chat_id=?", (chat_id,))
+            conn.execute("DELETE FROM events WHERE chat_id=?", (chat_id,))
+            conn.commit()
+        id_map = {}
+        stats = {"events":0, "state":0, "pool":0, "sublimated":0}
+        try:
+            for ev in events:
+                # vector may be list or b64
+                vec = ev.get("vector")
+                if vec is None and ev.get("vector_b64"):
+                    try:
+                        blob = base64.b64decode(ev["vector_b64"])
+                        vec = blob_to_vector(blob)
+                    except: vec = None
+                if isinstance(vec, list) and len(vec)>0:
+                    blob = vector_to_blob(vec)
+                else:
+                    blob = ev.get("vector")
+                    if isinstance(blob, list):
+                        blob = vector_to_blob(blob)
+                    elif isinstance(blob, str):
+                        try: blob = base64.b64decode(blob)
+                        except: blob = None
+                    elif not isinstance(blob, (bytes, bytearray)):
+                        blob = None
+                # insert
+                old_id = ev.get("id")
+                cols = ["chat_id","timestamp","time_bucket","role1","role2","souls","event_text","vector","metadata","created_at","last_active_at","counter"]
+                vals = [chat_id, ev.get("timestamp"), ev.get("time_bucket") or get_bucket(ev.get("timestamp") or time.time()*1000), ev.get("role1"), ev.get("role2"), ev.get("souls"), ev.get("event_text"), blob, _json.dumps(ev.get("metadata") or {}), ev.get("created_at") or ev.get("timestamp"), ev.get("last_active_at") or ev.get("timestamp"), ev.get("counter")]
+                cur = conn.execute(f"INSERT INTO events ({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})", tuple(vals))
+                new_id = cur.lastrowid
+                if old_id is not None:
+                    id_map[int(old_id)] = new_id
+                stats["events"] += 1
+            conn.commit()
+            # FAISS add
+            if stats["events"]:
+                try:
+                    new_ids = list(id_map.values()) if id_map else []
+                    if new_ids:
+                        vec_rows = conn.execute("SELECT id, vector FROM events WHERE chat_id=?", (chat_id,)).fetchall()
+                        vecs = []
+                        ids_added = []
+                        for vr in vec_rows:
+                            if vr["vector"] is not None and (not new_ids or vr["id"] in new_ids):
+                                try:
+                                    v = blob_to_vector(vr["vector"])
+                                    if v and len(v)>0:
+                                        vecs.append(v)
+                                        ids_added.append(vr["id"])
+                                except: pass
+                        if vecs:
+                            dim = len(vecs[0])
+                            ensure_index(dim)
+                            if faiss_index is not None:
+                                arr = np.asarray(vecs, dtype=np.float32)
+                                faiss_index.add(arr)
+                                faiss_ids.extend(ids_added)
+                except Exception as e:
+                    print(f"[import] faiss add failed: {e}")
+            for st in states:
+                old_eid = st.get("event_id")
+                new_eid = id_map.get(int(old_eid)) if old_eid is not None and int(old_eid) in id_map else old_eid
+                try:
+                    conn.execute("INSERT OR REPLACE INTO event_soul_state(event_id,chat_id,soul,counter,skip,stuck,birth_ts,last_eval,why_init,why_log) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (new_eid, chat_id, st.get("soul"), st.get("counter",2), st.get("skip",0), st.get("stuck",0), st.get("birth_ts") or time.time()*1000, st.get("last_eval") or time.time()*1000, st.get("why_init"), st.get("why_log") or '[]'))
+                    stats["state"] += 1
+                except Exception as e:
+                    print(f"[import] state insert failed: {e}")
+            for p in pools:
+                old_eid = p.get("event_id")
+                new_eid = id_map.get(int(old_eid)) if old_eid is not None and int(old_eid) in id_map else old_eid
+                try:
+                    conn.execute("INSERT OR IGNORE INTO short_pool(chat_id,soul,event_id) VALUES (?,?,?)", (chat_id, p.get("soul"), new_eid))
+                    stats["pool"] += 1
+                except: pass
+            for s in subs:
+                old_eid = s.get("event_id")
+                new_eid = id_map.get(int(old_eid)) if old_eid is not None and int(old_eid) in id_map else old_eid
+                try:
+                    conn.execute("INSERT INTO sublimated(chat_id,soul,event_id,counter,title,content,created_at) VALUES (?,?,?,?,?,?,?)",
+                        (chat_id, s.get("soul"), new_eid, s.get("counter"), s.get("title"), s.get("content"), s.get("created_at") or time.time()*1000))
+                    stats["sublimated"] += 1
+                except: pass
+            conn.commit()
+            conn.close()
+            return {"ok": True, "chat_id": chat_id, "stats": stats}
+        except Exception as e:
+            try: conn.rollback(); conn.close()
+            except: pass
+            raise HTTPException(500, f"导入失败: {e}")
 
 # --------------------------------------------------------------------------- #
 # Events
@@ -941,7 +1519,7 @@ def api_sync_short_pool(payload: ShortPoolSync):
         eid = ev.get("event_id") or ev.get("id")
         soul = ev.get("soul")
         action = ev.get("action")
-        why = (ev.get("why") or ev.get("reason") or "")[:120]
+        why = (ev.get("why") or ev.get("reason") or "")[:300]
         if not eid or not soul or action not in ("+1","-1","Skip"):
             continue
         row = conn.execute("SELECT * FROM event_soul_state WHERE event_id=? AND soul=?", (eid, soul)).fetchone()

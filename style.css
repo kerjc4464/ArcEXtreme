@@ -437,3 +437,18 @@
     .ax-modal__panel { width: 98vw; height: 92vh; border-radius: 14px; }
     .ax-modal__header { padding: 10px 12px; }
 }
+/* Soul 启用开关 */
+.ax-soul__row { align-items: center !important; }
+.ax-soul__row.is-disabled { background: rgba(239,68,68,.06) !important; border-color: rgba(239,68,68,.15) !important; }
+.ax-soul__toggle { margin-left:auto; display:flex; align-items:center; cursor:pointer; }
+.ax-soul__toggle input { display:none; }
+.ax-soul__slider { width:34px; height:20px; border-radius:99px; background:rgba(255,255,255,.14); border:1px solid rgba(255,255,255,.12); position:relative; transition:.18s; display:inline-block; }
+.ax-soul__slider::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.3); transition:.18s; }
+.ax-soul__toggle input:checked + .ax-soul__slider { background: linear-gradient(135deg, var(--ax-accent), var(--ax-accent-2)); border-color:transparent; }
+.ax-soul__toggle input:checked + .ax-soul__slider::after { transform: translateX(14px); }
+/* Chat 迁移表 */
+.ax-table { border-collapse:collapse; }
+.ax-table th { text-align:left; padding:6px 8px; font-size:11px; opacity:.6; border-bottom:1px solid var(--ax-border); background:rgba(255,255,255,.04); }
+.ax-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
+.ax-table tr:hover { background: rgba(255,255,255,.03); }
+.ax-table tr[data-chat] input[type="radio"] { accent-color: var(--ax-accent); }

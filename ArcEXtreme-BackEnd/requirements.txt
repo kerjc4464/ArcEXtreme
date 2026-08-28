@@ -1,9 +1,10 @@
-# 锁版（2026-08-25 验证于 Python 3.10-3.11，CPU-only，不引入 faiss-gpu/cuda）
-# 前端通过 SillyTavern 扩展加载，后端独立 FastAPI，量级小无需 N 卡
-fastapi==0.110.3
-uvicorn[standard]==0.30.6
-numpy==1.26.4
-faiss-cpu==1.7.4
-httpx==0.27.2
-pyyaml==6.0.1
-# 备注: faiss-cpu 在部分 arm64/旧 glibc 需换 faiss-cpu==1.8.0 或 conda 安装
+# 兼容版（验证于 Python 3.10-3.13，CPU-only）
+# 2026-08-27 起放宽 pin 以兼容 Python 3.13（numpy 1.26.4 在 3.13 无 wheel 会编译失败）
+# 已验证组合：Python 3.13.5 + numpy 2.4.0 + faiss-cpu 1.10.0 + fastapi 0.116.1 可正常运行
+fastapi>=0.110.3,<1
+uvicorn[standard]>=0.30.6
+numpy>=1.26.4
+faiss-cpu>=1.7.4
+httpx>=0.27.2
+pyyaml>=6.0.1
+# 备注: faiss-cpu 在部分 arm64/旧 glibc 需用 conda 安装；若遇编译失败请先 pip install faiss-cpu --no-build-isolation

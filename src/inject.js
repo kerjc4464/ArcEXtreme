@@ -66,7 +66,7 @@ export function buildShortPoolBlock(poolsGrouped, perSoulCap){
             const att = COUNTER_ATT[e.counter] || '';
             const soulTag = e.pool_soul || soul;
             const whyInit = e.why_init ? ` 初因:${String(e.why_init).slice(0,200)}` : '';
-            const whyLog = Array.isArray(e.why_log) && e.why_log.length ? ` · 溯因:${e.why_log.slice(-3).map(w=>`${w.action}(${String(w.why).slice(0,120)})`).join('→')}` : '';
+            const whyLog = Array.isArray(e.why_log) && e.why_log.length ? ` · 溯因:${e.why_log.slice(-3).map(w=>`${w.action}(${String(w.why).slice(0,300)})`).join('→')}` : '';
             lines.push(`- [${e.counter??'?'}:${att}${e.skip!=null?` skip${e.skip}`:''}] 【${soulTag}】${e.event_text}${fmtCounter(e)}${whyInit}${whyLog}`);
         }
     }

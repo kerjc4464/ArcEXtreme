@@ -23,7 +23,7 @@ export function log(msg) {
     else if (/不可达|失败|错误/.test(msg)) setStatus('err', '异常');
 }
 
-export function renderSoulsList(items) {
+export function renderSoulsList(items, opts={}) {
     const ul = document.getElementById('arcextreme-souls');
     if (!ul) return;
     if (!items.length) {
@@ -31,14 +31,43 @@ export function renderSoulsList(items) {
         setStatus('warn', '无 souls');
         return;
     }
+    const onToggle = opts.onToggle;
+    const enabledMap = opts.enabledMap;
+    const enabledCount = items.filter(s=> s.enabled !== false).length;
+    // header summary is handled by caller, but we update disabled style
     ul.innerHTML = items
         .map((s) => {
             const fmt = escapeHtml(s.format || 'soul');
             const name = escapeHtml(s.name);
             const title = escapeHtml(s.filename || s.name);
-            return `<li title="${title}"><span class="tag tag--soul">${fmt}</span><span class="ax-event__text">${name}</span></li>`;
+            const enabled = s.enabled !== false;
+            const disClass = enabled ? '' : ' is-disabled';
+            const checked = enabled ? 'checked' : '';
+            const toggle = onToggle ? `<label class="ax-soul__toggle" title="${enabled?'已启用·点击禁用':'已禁用·点击启用'}"><input type="checkbox" data-soul="${name}" ${checked}><span class="ax-soul__slider"></span></label>` : '';
+            return `<li title="${title}" class="ax-soul__row${disClass}"><span class="tag tag--soul">${fmt}</span><span class="ax-event__text" style="${enabled?'':'opacity:.45;text-decoration:line-through'}">${name}${enabled?'':' <small style="opacity:.6">(已禁用)</small>'}</span>${toggle}</li>`;
         })
         .join('');
+    if (onToggle) {
+        ul.querySelectorAll('input[data-soul]').forEach(chk=>{
+            chk.addEventListener('change', async ()=>{
+                const soulName = chk.getAttribute('data-soul');
+                const val = chk.checked;
+                chk.disabled = true;
+                try { await onToggle(soulName, val); } catch(e){ pushToast('fail', `Soul切换失败: ${e.message}`); chk.checked = !val; }
+                finally { chk.disabled = false; }
+            });
+        });
+    }
+}
+export function renderSoulsListSimple(items) {
+    // for modal without toggle
+    const ul = document.getElementById('arcextreme-modal-souls');
+    if (!ul) return;
+    if (!items.length) { ul.innerHTML = '<li class="ax-empty"><i class="fa-solid fa-ghost"></i> 暂无 souls</li>'; return; }
+    ul.innerHTML = items.map(s=> {
+        const en = s.enabled !== false;
+        return `<li class="${en?'':'is-disabled'}" style="${en?'':'opacity:.5'}"><span class="tag tag--soul"><i class="fa-solid fa-user-tag"></i> ${escapeHtml(s.name)}</span><span class="ax-event__text">${escapeHtml(s.filename||'')}<small class="ax-event__meta" style="opacity:.5">${en?'已启用':'已禁用'}</small></span></li>`;
+    }).join('');
 }
 
 export function renderEventsList(items, onDelete) {
