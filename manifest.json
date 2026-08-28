@@ -1,0 +1,13 @@
+{
+  "display_name": "ArcEXtreme",
+  "loading_order": 6000,
+  "requires": [],
+  "optional": ["embeddings"],
+  "generate_interceptor": "arcextreme_generate",
+  "js": "index.js",
+  "css": "style.css",
+  "author": "ArcEXtreme",
+  "version": "0.1.0",
+  "homePage": "",
+  "description": "基于事件提取 + 时间分桶 + 向量检索 + Rerank 的记忆增强扩展。"
+}

@@ -1,0 +1,933 @@
+<div class="arcextreme-panel">
+    <!-- Hero / Header -->
+    <div class="ax-hero">
+        <div class="ax-hero__left">
+            <div class="ax-hero__icon"><i class="fa-solid fa-brain"></i></div>
+            <div class="ax-hero__text">
+                <div class="ax-hero__title">ArcEXtreme <span class="ax-hero__ver">v0.1</span></div>
+                <div class="ax-hero__sub">Dynamic DE_RLHF</div>
+            </div>
+        </div>
+        <div class="ax-hero__right">
+            <div class="ax-status" title="后端连接状态">
+                <span class="ax-status__dot" id="arcextreme-status-dot"></span>
+                <span class="ax-status__label" id="arcextreme-status-label">未检测</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 折叠控制条 -->
+    <div class="ax-controls">
+        <div class="menu_button menu_button_icon" id="arcextreme-expand-all" title="全部展开"><i class="fa-solid fa-angles-down"></i> 展开</div>
+        <div class="menu_button menu_button_icon" id="arcextreme-collapse-all" title="全部收起"><i class="fa-solid fa-angles-up"></i> 收起</div>
+        <span class="ax-controls__hint">面板支持折叠，长配置不占地</span>
+        <span style="flex:1"></span>
+        <small style="opacity:.5"><i class="fa-regular fa-lightbulb"></i> 点击标题可折叠</small>
+    </div>
+
+    <!-- 实时流水线 -->
+    <div class="ax-pipeline" id="arcextreme-pipeline" title="最近一次生成/提炼的流水线状态">
+        <span class="ax-pipe__label"><i class="fa-solid fa-diagram-project"></i> 流水线</span>
+        <div class="ax-pipe__track">
+            <span class="ax-pipe__dot" data-step="extract"><i class="fa-solid fa-wand-magic-sparkles"></i> 提炼</span>
+            <span class="ax-pipe__arrow">→</span>
+            <span class="ax-pipe__dot" data-step="subagent"><i class="fa-solid fa-microchip"></i> 裁判</span>
+            <span class="ax-pipe__arrow">→</span>
+            <span class="ax-pipe__dot" data-step="route"><i class="fa-solid fa-route"></i> 路由</span>
+            <span class="ax-pipe__arrow">→</span>
+            <span class="ax-pipe__dot" data-step="query"><i class="fa-solid fa-magnifying-glass"></i> 检索</span>
+            <span class="ax-pipe__arrow">→</span>
+            <span class="ax-pipe__dot" data-step="rerank"><i class="fa-solid fa-arrow-up-wide-short"></i> 精排</span>
+            <span class="ax-pipe__arrow">→</span>
+            <span class="ax-pipe__dot" data-step="inject"><i class="fa-solid fa-syringe"></i> 注入</span>
+            <span class="ax-pipe__arrow">→</span>
+            <span class="ax-pipe__dot" data-step="sublimate"><i class="fa-solid fa-fire"></i> 升华</span>
+        </div>
+    </div>
+
+    <!-- 顶部快捷操作条 -->
+    <div class="ax-quickbar">
+        <label class="ax-switch ax-switch--master" title="主开关 — 关了就全关（提炼/裁判/路由/检索/注入/升华全部停用）">
+            <input type="checkbox" id="arcextreme-enabled" />
+            <span class="ax-switch__slider"></span>
+            <span class="ax-switch__label"><i class="fa-solid fa-power-off"></i> 主开关</span>
+        </label>
+        <small class="ax-master-hint" title="关闭后全部链路暂停，已注入的记忆也会立即清除">关了就全关</small>
+        <label class="checkbox_label ax-quickbar__check" title="在控制台与日志面板输出调试信息">
+            <input type="checkbox" id="arcextreme-debug" />
+            <span><i class="fa-solid fa-bug"></i> 调试日志</span>
+        </label>
+        <div class="ax-quickbar__spacer"></div>
+        <div class="ax-quickbar__actions">
+            <div id="arcextreme-test" class="menu_button menu_button_icon ax-btn--ghost" title="测试后端连通性"><i class="fa-solid fa-plug"></i> 测试</div>
+            <div id="arcextreme-rebuild" class="menu_button menu_button_icon ax-btn--ghost" title="重建向量索引"><i class="fa-solid fa-rotate"></i> 重建索引</div>
+        </div>
+    </div>
+    <!-- 主开关关闭横幅：关了就全关 -->
+    <div id="arcextreme-master-off-banner" class="ax-master-off-banner" style="display:none">
+        <i class="fa-solid fa-power-off"></i>
+        <span>主开关已关闭 — 全部记忆链路已停用</span>
+        <small>提炼 · 裁判 · 路由 · 检索 · 注入 · 升华 已全部暂停，已注入内容已清除</small>
+        <span style="flex:1"></span>
+        <span class="ax-master-off-banner__action"><i class="fa-solid fa-arrow-up"></i> 打开上方主开关恢复</span>
+    </div>
+
+    <!-- 调用轨迹 （默认展开，直观反馈） -->
+    <div class="inline-drawer ax-drawer open" id="arcextreme-trace-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-wave-square"></i> 调用轨迹 <span class="ax-badge ax-badge--live">LIVE</span> <span class="ax-badge ax-badge--muted" id="arcextreme-trace-count">0</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                <small class="ax-hint" style="flex:1; margin:0"><i class="fa-solid fa-circle-info"></i> 每步LLM实时反馈，SubAgent已防刷屏折叠</small>
+                <div class="ax-trace__filters" style="display:flex; gap:4px; flex-wrap:wrap;">
+                    <span class="ax-trace__filter is-active" data-filter="all">全部</span>
+                    <span class="ax-trace__filter" data-filter="fail">失败</span>
+                    <span class="ax-trace__filter" data-filter="subagent">SubAgent</span>
+                    <span class="ax-trace__filter" data-filter="extract">提炼</span>
+                </div>
+                <div id="arcextreme-trace-collapse-all" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px" title="全部折叠"><i class="fa-solid fa-compress"></i> 折叠</div>
+                <div id="arcextreme-trace-expand-all2" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px" title="全部展开"><i class="fa-solid fa-expand"></i> 展开</div>
+                <div id="arcextreme-trace-clear" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-trash-can"></i> 清空</div>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:4px">
+                <small class="ax-hint" style="margin:0"><i class="fa-solid fa-eye-slash"></i> 自动折叠成功项</small>
+                <label class="ax-switch" style="scale:.85"><input type="checkbox" id="arcextreme-trace-autocollapse" checked><span class="ax-switch__slider"></span></label>
+                <small class="ax-hint" style="margin:0">仅失败自动展开</small>
+                <span style="flex:1"></span>
+                <small class="ax-hint" id="arcextreme-trace-paging" style="margin:0; opacity:.6"></small>
+            </div>
+            <div id="arcextreme-trace-empty" class="ax-trace__empty">
+                <i class="fa-solid fa-satellite-dish" style="font-size:18px; opacity:.7"></i>
+                <span>暂无调用 · 发送消息或生成回复后在此查看</span>
+                <small style="opacity:.6">事件提炼 / 路由决策 / Rerank 均会留痕，失败也会高亮提示</small>
+            </div>
+            <ul id="arcextreme-trace" class="ax-trace-list"></ul>
+        </div>
+    </div>
+
+    <!-- 连接设置 -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-link"></i> 连接 · 后端</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="ax-grid ax-grid--single">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-backend"><small>后端地址</small></label>
+                    <div class="flex-container">
+                        <input type="text" id="arcextreme-backend" class="text_pole flex1" placeholder="http://127.0.0.1:9001" />
+                        <div class="menu_button menu_button_icon ax-inline-btn" onclick="document.getElementById('arcextreme-test')?.click()"><i class="fa-solid fa-paper-plane"></i></div>
+                    </div>
+                    <small class="ax-hint"><i class="fa-solid fa-circle-info"></i> 需先启动 <code>ArcEXtreme-BackEnd</code>，默认端口 9001</small>
+                    <div id="arcextreme-backend-effective" class="ax-hint" style="margin-top:4px; padding:4px 8px; background:rgba(139,124,246,.08); border:1px solid rgba(139,124,246,.18); border-radius:6px; display:none"></div>
+                </div>
+            </div>
+            <div class="ax-log-wrap">
+                <div class="ax-log__header">
+                    <span><i class="fa-solid fa-terminal"></i> 运行日志</span>
+                    <span class="ax-log__actions">
+                        <i class="fa-solid fa-trash-can menu_button menu_button_icon" title="清空日志" onclick="document.getElementById('arcextreme-log').textContent=''"></i>
+                    </span>
+                </div>
+                <div id="arcextreme-log" class="ax-log"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 事件提取 LLM -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-wand-magic-sparkles"></i> 事件提取 LLM <span class="ax-badge">OpenAI 兼容</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="ax-grid">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-extract-url"><small>Base URL</small></label>
+                    <input type="text" id="arcextreme-extract-url" class="text_pole" placeholder="https://api.openai.com/v1" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-extract-model"><small>模型</small></label>
+                    <input type="text" id="arcextreme-extract-model" class="text_pole" placeholder="gpt-4o-mini / deepseek-r1 / o3-mini" />
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-extract-key"><small>API Key</small></label>
+                <input type="password" id="arcextreme-extract-key" class="text_pole" placeholder="sk-..." />
+            </div>
+            <small class="ax-hint"><i class="fa-solid fa-lightbulb"></i> 从用户消息中提炼事件（≤2句）并匹配 <code>souls</code> 角色</small>
+
+            <details class="ax-adv">
+                <summary class="ax-adv__summary"><i class="fa-solid fa-sliders"></i> 高级参数 <span class="ax-adv__hint">温度 / 最大回复 / 推理</span> <i class="fa-solid fa-chevron-down ax-adv__chev"></i></summary>
+                <div class="ax-adv__body">
+                    <div class="ax-grid ax-grid--2">
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-extract-temp"><small>温度 (temperature) <span class="ax-val" id="arcextreme-extract-temp-val"></span></small></label>
+                            <div class="ax-range-wrap">
+                                <input type="range" id="arcextreme-extract-temp" min="0" max="2" step="0.05" />
+                                <input type="number" id="arcextreme-extract-temp-num" class="text_pole ax-range-num" min="0" max="2" step="0.05" />
+                            </div>
+                            <small class="ax-hint">0=确定 1=默认 2=发散，默认1.0；推理模型若报错请取消勾选下方“推理时仍发温度”</small>
+                        </div>
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-extract-maxtokens"><small>最大回复 (max tokens)</small></label>
+                            <input type="number" id="arcextreme-extract-maxtokens" class="text_pole" min="0" max="32768" step="1" placeholder="0=不限，推荐 2048" />
+                            <small class="ax-hint"><b>0=不限</b>（不发送参数，由模型默认决定）；&gt;0时普通模型只算正文，推理模型算<b>正文+推理之和</b>（含思考）</small>
+                        </div>
+                    </div>
+                    <div class="ax-grid ax-grid--2 marginTop5">
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-extract-reasoning"><small>推理强度 (reasoning_effort)</small></label>
+                            <select id="arcextreme-extract-reasoning" class="text_pole">
+                                <option value="none">none - 关闭（兼容普通模型）</option>
+                                <option value="low">low - 轻量</option>
+                                <option value="medium">medium - 均衡</option>
+                                <option value="high">high - 深度</option>
+                            </select>
+                            <small class="ax-hint">仅 o1/o3/deepseek-r1 等推理模型生效，普通模型请选 none</small>
+                        </div>
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-extract-reasoning-tokens"><small>推理预算 (tokens)</small></label>
+                            <input type="number" id="arcextreme-extract-reasoning-tokens" class="text_pole" min="0" max="32768" step="64" placeholder="0=不限" />
+                            <small class="ax-hint"><b>0=不限</b>（模型想推多少推多少，上限受“最大回复”约束）；&gt;0时硬性限制思考长度</small>
+                        </div>
+                    </div>
+                    <label class="checkbox_label marginTop5" for="arcextreme-extract-sendtemp" title="推理模型（o1）通常不允许 temperature≠1，默认不发送以避免 400 错误">
+                        <input type="checkbox" id="arcextreme-extract-sendtemp" />
+                        <span>推理时仍发送温度</span>
+                        <small class="ax-hint--inline">默认关闭，防 o1 报错</small>
+                    </label>
+                    <div class="flex-container flexFlowColumn marginTop5">
+                        <label for="arcextreme-extract-timeout"><small>超时 (秒)</small></label>
+                        <input type="number" id="arcextreme-extract-timeout" class="text_pole" min="5" max="300" step="1" placeholder="40" />
+                        <small class="ax-hint">默认 40 秒，可按网络自行调大</small>
+                    </div>
+                </div>
+            </details>
+        </div>
+    </div>
+
+    <!-- 路由 LLM -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-route"></i> 路由 LLM <span class="ax-badge ax-badge--muted">分桶选择</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label class="checkbox_label marginBot5" for="arcextreme-route-useextract">
+                <input type="checkbox" id="arcextreme-route-useextract" />
+                <span>复用提取 LLM 配置</span>
+                <small class="ax-hint--inline">开启后下方独立配置（含高级参数）全部忽略</small>
+            </label>
+            <div class="ax-grid">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-route-url"><small>Base URL</small></label>
+                    <input type="text" id="arcextreme-route-url" class="text_pole" placeholder="留空则复用提取 LLM" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-route-model"><small>模型</small></label>
+                    <input type="text" id="arcextreme-route-model" class="text_pole" placeholder="gpt-4o-mini" />
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-route-key"><small>API Key</small></label>
+                <input type="password" id="arcextreme-route-key" class="text_pole" />
+            </div>
+            <small class="ax-hint"><i class="fa-solid fa-diagram-project"></i> 根据当前消息 + <code>souls</code> 设定，智能决定检索哪些时间分桶</small>
+
+            <details class="ax-adv" id="arcextreme-route-adv">
+                <summary class="ax-adv__summary"><i class="fa-solid fa-sliders"></i> 高级参数 <span class="ax-adv__hint">温度 / 最大回复 / 推理</span> <i class="fa-solid fa-chevron-down ax-adv__chev"></i></summary>
+                <div class="ax-adv__body">
+                    <div class="ax-grid ax-grid--2">
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-route-temp"><small>温度 <span class="ax-val" id="arcextreme-route-temp-val"></span></small></label>
+                            <div class="ax-range-wrap">
+                                <input type="range" id="arcextreme-route-temp" min="0" max="2" step="0.05" />
+                                <input type="number" id="arcextreme-route-temp-num" class="text_pole ax-range-num" min="0" max="2" step="0.05" />
+                            </div>
+                            <small class="ax-hint">默认1.0，推理模型若400错误请取消“推理时仍发温度”</small>
+                        </div>
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-route-maxtokens"><small>最大回复 (max tokens)</small></label>
+                            <input type="number" id="arcextreme-route-maxtokens" class="text_pole" min="0" max="32768" step="1" placeholder="0=不限" />
+                            <small class="ax-hint"><b>0=不限</b>；&gt;0时普通模型只算正文，推理模型算正文+推理之和</small>
+                        </div>
+                    </div>
+                    <div class="ax-grid ax-grid--2 marginTop5">
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-route-reasoning"><small>推理强度</small></label>
+                            <select id="arcextreme-route-reasoning" class="text_pole">
+                                <option value="none">none - 关闭</option>
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high</option>
+                            </select>
+                            <small class="ax-hint">仅推理模型生效</small>
+                        </div>
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-route-reasoning-tokens"><small>推理预算 (tokens)</small></label>
+                            <input type="number" id="arcextreme-route-reasoning-tokens" class="text_pole" min="0" max="32768" step="64" placeholder="0=不限" />
+                            <small class="ax-hint"><b>0=不限</b>（想推多少推多少）</small>
+                        </div>
+                    </div>
+                    <label class="checkbox_label marginTop5" for="arcextreme-route-sendtemp">
+                        <input type="checkbox" id="arcextreme-route-sendtemp" />
+                        <span>推理时仍发送温度</span>
+                    </label>
+                    <div class="flex-container flexFlowColumn marginTop5">
+                        <label for="arcextreme-route-timeout"><small>超时 (秒)</small></label>
+                        <input type="number" id="arcextreme-route-timeout" class="text_pole" min="5" max="300" step="1" placeholder="40" />
+                        <small class="ax-hint">默认 40 秒</small>
+                    </div>
+                </div>
+            </details>
+        </div>
+    </div>
+
+    <!-- Embedding -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-cube"></i> Embedding <span class="ax-badge ax-badge--accent">向量化</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="ax-grid ax-grid--3">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-embed-source"><small>来源</small></label>
+                    <select id="arcextreme-embed-source" class="text_pole">
+                        <option value="openai">OpenAI 兼容 (通用)</option>
+                        <option value="vllm">vLLM</option>
+                        <option value="ollama">Ollama</option>
+                    </select>
+                </div>
+                <div class="flex-container flexFlowColumn" style="grid-column: span 2;">
+                    <label for="arcextreme-embed-model"><small>模型</small></label>
+                    <input type="text" id="arcextreme-embed-model" class="text_pole" placeholder="text-embedding-3-small / bge-m3 等" />
+                </div>
+            </div>
+            <div class="ax-grid marginTop5">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-embed-url"><small>Base URL</small></label>
+                    <input type="text" id="arcextreme-embed-url" class="text_pole" placeholder="https://.../v1 或 http://...:11434" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-embed-key"><small>API Key</small></label>
+                    <input type="password" id="arcextreme-embed-key" class="text_pole" />
+                </div>
+            </div>
+            <small class="ax-hint"><i class="fa-solid fa-circle-info"></i> 选择 <code>OpenAI 兼容</code> 可接入任意 OpenAI 格式的 Embedding 服务（硅基流动、OneAPI 等）</small>
+        </div>
+    </div>
+
+    <!-- Rerank -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-arrow-up-wide-short"></i> Rerank <span class="ax-badge ax-badge--muted">可选</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label class="checkbox_label marginBot5" for="arcextreme-rerank-enabled">
+                <input type="checkbox" id="arcextreme-rerank-enabled" />
+                <span>启用 Rerank 精排</span>
+            </label>
+            <div class="ax-grid">
+                <div class="flex-container flexFlowColumn" style="grid-column: span 2;">
+                    <label for="arcextreme-rerank-url"><small>接口地址</small></label>
+                    <input type="text" id="arcextreme-rerank-url" class="text_pole" placeholder="https://.../rerank" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-rerank-model"><small>模型</small></label>
+                    <input type="text" id="arcextreme-rerank-model" class="text_pole" placeholder="rerank-model" />
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-rerank-key"><small>API Key</small></label>
+                <input type="password" id="arcextreme-rerank-key" class="text_pole" />
+            </div>
+        </div>
+    </div>
+
+    <!-- 提示词模板 -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-file-lines"></i> 提示词模板 <span class="ax-badge ax-badge--accent">可编辑</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:4px">
+                <small class="ax-hint" style="flex:1; margin:0"><i class="fa-solid fa-circle-info"></i> 变量：<code>{{soulsText}}</code>(提取时含人设节选) <code>{{buckets}}</code> <code>{{userMessage}}</code> <code>{{context}}</code> <code>{{soulCount}}</code> | SubAgent: <code>{{soul}}</code> <code>{{counter}}</code> <code>{{soulSnippet}}</code>(1200字节选) <code>{{soulContent}}</code>(同义) | 升华: <code>{{soulContent}}</code>(完整4000字) <code>{{event}}</code> <code>{{stuck}}</code> <code>{{skip}}</code></small>
+                <div id="arcextreme-prompt-reset-all" class="menu_button menu_button_icon" style="padding:4px 10px; font-size:12px; background:linear-gradient(135deg,#ef4444,#f59e0b); color:#fff; border:none" title="一键全部恢复默认"><i class="fa-solid fa-rotate"></i> 全部重置</div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-prompt-extract-sys"><small>事件提取 — 系统提示词</small></label>
+                <textarea id="arcextreme-prompt-extract-sys" class="text_pole ax-prompt-editor" rows="6"></textarea>
+                <div style="display:flex; gap:6px; margin-top:4px">
+                    <div id="arcextreme-prompt-extract-sys-reset" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-rotate-left"></i> 恢复默认</div>
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-prompt-extract-user"><small>事件提取 — 用户模板</small></label>
+                <textarea id="arcextreme-prompt-extract-user" class="text_pole ax-prompt-editor" rows="3"></textarea>
+                <div style="display:flex; gap:6px; margin-top:4px">
+                    <div id="arcextreme-prompt-extract-user-reset" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-rotate-left"></i> 恢复默认</div>
+                </div>
+            </div>
+            <hr style="border-color: var(--ax-border); margin:10px 0">
+            <div class="flex-container flexFlowColumn">
+                <label for="arcextreme-prompt-route-sys"><small>路由决策 — 系统提示词</small></label>
+                <textarea id="arcextreme-prompt-route-sys" class="text_pole ax-prompt-editor" rows="5"></textarea>
+                <div style="display:flex; gap:6px; margin-top:4px">
+                    <div id="arcextreme-prompt-route-sys-reset" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-rotate-left"></i> 恢复默认</div>
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-prompt-route-user"><small>路由决策 — 用户模板</small></label>
+                <textarea id="arcextreme-prompt-route-user" class="text_pole ax-prompt-editor" rows="3"></textarea>
+                <div style="display:flex; gap:6px; margin-top:4px">
+                    <div id="arcextreme-prompt-route-user-reset" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-rotate-left"></i> 恢复默认</div>
+                </div>
+            </div>
+            <hr style="border-color: var(--ax-border); margin:10px 0">
+            <div class="flex-container flexFlowColumn">
+                <label for="arcextreme-prompt-subagent-sys"><small>SubAgent裁判 — 系统提示词</small></label>
+                <textarea id="arcextreme-prompt-subagent-sys" class="text_pole ax-prompt-editor" rows="4"></textarea>
+                <div style="display:flex; gap:6px; margin-top:4px">
+                    <div id="arcextreme-prompt-subagent-sys-reset" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-rotate-left"></i> 恢复默认</div>
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-prompt-subagent-user"><small>SubAgent裁判 — 用户模板</small></label>
+                <textarea id="arcextreme-prompt-subagent-user" class="text_pole ax-prompt-editor" rows="3"></textarea>
+                <div style="display:flex; gap:6px; margin-top:4px">
+                    <div id="arcextreme-prompt-subagent-user-reset" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-rotate-left"></i> 恢复默认</div>
+                </div>
+            </div>
+            <hr style="border-color: var(--ax-border); margin:10px 0">
+            <div class="flex-container flexFlowColumn">
+                <label for="arcextreme-prompt-sublimate-sys"><small>升华 — 系统提示词</small></label>
+                <textarea id="arcextreme-prompt-sublimate-sys" class="text_pole ax-prompt-editor" rows="4"></textarea>
+                <div style="display:flex; gap:6px; margin-top:4px">
+                    <div id="arcextreme-prompt-sublimate-sys-reset" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-rotate-left"></i> 恢复默认</div>
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-prompt-sublimate-user"><small>升华 — 用户模板</small></label>
+                <textarea id="arcextreme-prompt-sublimate-user" class="text_pole ax-prompt-editor" rows="3"></textarea>
+                <div style="display:flex; gap:6px; margin-top:4px">
+                    <div id="arcextreme-prompt-sublimate-user-reset" class="menu_button menu_button_icon" style="padding:3px 8px; font-size:12px"><i class="fa-solid fa-rotate-left"></i> 恢复默认</div>
+                </div>
+            </div>
+            <div class="ax-grid ax-grid--3 marginTop5">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-context-window"><small>提取历史楼层</small></label>
+                    <select id="arcextreme-context-window" class="text_pole">
+                        <option value="1">1 - 仅当前</option>
+                        <option value="5" selected>5 - 前2轮（默认）</option>
+                        <option value="10">10 - 较长</option>
+                        <option value="15">15</option>
+                        <option value="25">25</option>
+                        <option value="custom">自定义…</option>
+                    </select>
+                    <input type="number" id="arcextreme-context-window-custom" class="text_pole" min="1" max="50" placeholder="1-50" style="display:none; margin-top:4px" />
+                    <small class="ax-hint">提取 {{context}}，默认5</small>
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-route-context-window"><small>路由历史楼层</small></label>
+                    <select id="arcextreme-route-context-window" class="text_pole">
+                        <option value="1">1</option>
+                        <option value="5" selected>5（默认）</option>
+                        <option value="10">10</option>
+                        <option value="15">15</option>
+                        <option value="25">25</option>
+                        <option value="custom">自定义…</option>
+                    </select>
+                    <input type="number" id="arcextreme-route-context-window-custom" class="text_pole" min="1" max="50" placeholder="1-50" style="display:none; margin-top:4px" />
+                    <small class="ax-hint">路由 {{context}}，默认5</small>
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-subagent-context-window"><small>SubAgent历史楼层</small></label>
+                    <select id="arcextreme-subagent-context-window" class="text_pole">
+                        <option value="5">5</option>
+                        <option value="10" selected>10 - 默认</option>
+                        <option value="15">15 - 快捷</option>
+                        <option value="25">25 - 快捷</option>
+                        <option value="custom">自定义…</option>
+                    </select>
+                    <input type="number" id="arcextreme-subagent-context-window-custom" class="text_pole" min="1" max="50" placeholder="1-50" style="display:none; margin-top:4px" />
+                    <small class="ax-hint">裁判 {{context}}，默认10，越大越准越费token</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 注入策略 -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-syringe"></i> 注入策略</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="ax-grid ax-grid--3">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-inject-position"><small>注入位置</small></label>
+                    <select id="arcextreme-inject-position" class="text_pole"></select>
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-inject-depth"><small>注入深度</small></label>
+                    <input type="number" id="arcextreme-inject-depth" class="text_pole" min="0" max="20" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-inject-role"><small>角色</small></label>
+                    <select id="arcextreme-inject-role" class="text_pole"></select>
+                </div>
+            </div>
+            <div class="ax-grid marginTop5">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-recentdays"><small>近 N 天常驻</small></label>
+                    <input type="number" id="arcextreme-recentdays" class="text_pole" min="1" max="365" />
+                    <small class="ax-hint">始终注入的近期事件天数</small>
+                </div>
+                <div class="flex-container alignItemsCenter">
+                    <label class="checkbox_label" for="arcextreme-inject-wi">
+                        <input type="checkbox" id="arcextreme-inject-wi" />
+                        <span>参与世界书扫描</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 短期池 BTB -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-layer-group"></i> 短期池 BTB <span class="ax-badge ax-badge--accent">2bit</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="ax-grid ax-grid--3">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-short-cap"><small>每Soul容量 (perSoulCap)</small></label>
+                    <input type="number" id="arcextreme-short-cap" class="text_pole" min="5" max="30" />
+                    <small class="ax-hint">每个角色独立短期池，默认15</small>
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-short-skip"><small>Skip阈值 (skip>阈值驱逐)</small></label>
+                    <input type="number" id="arcextreme-short-skip" class="text_pole" min="1" max="10" />
+                    <small class="ax-hint">默认3，Skip轮数最多者下沉长期池</small>
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-short-stuck"><small>stuck阈值 (升华)</small></label>
+                    <input type="number" id="arcextreme-short-stuck" class="text_pole" min="3" max="20" />
+                    <small class="ax-hint">连续强态(0/3)达阈值升华，默认8</small>
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5" style="border:1px solid var(--ax-border); border-radius:10px; padding:10px; background:rgba(255,255,255,.03)">
+                <label class="checkbox_label" for="arcextreme-weight-enabled">
+                    <input type="checkbox" id="arcextreme-weight-enabled" />
+                    <span><i class="fa-solid fa-weight-scale"></i> 启用Y权重联动 (score' = score × Y[n])</span>
+                    <small class="ax-hint--inline">对长期召回按2bit加权</small>
+                </label>
+                <div class="ax-grid ax-grid--4 marginTop5" id="arcextreme-weight-grid">
+                    <div class="flex-container flexFlowColumn">
+                        <label for="arcextreme-weight-m0"><small>0强拒绝 ×Y</small></label>
+                        <input type="number" id="arcextreme-weight-m0" class="text_pole" min="0.2" max="3" step="0.05" />
+                    </div>
+                    <div class="flex-container flexFlowColumn">
+                        <label for="arcextreme-weight-m1"><small>1弱拒绝 ×Y</small></label>
+                        <input type="number" id="arcextreme-weight-m1" class="text_pole" min="0.2" max="3" step="0.05" />
+                    </div>
+                    <div class="flex-container flexFlowColumn">
+                        <label for="arcextreme-weight-m2"><small>2弱接纳 ×Y</small></label>
+                        <input type="number" id="arcextreme-weight-m2" class="text_pole" min="0.2" max="3" step="0.05" />
+                    </div>
+                    <div class="flex-container flexFlowColumn">
+                        <label for="arcextreme-weight-m3"><small>3强接纳 ×Y</small></label>
+                        <input type="number" id="arcextreme-weight-m3" class="text_pole" min="0.2" max="3" step="0.05" />
+                    </div>
+                </div>
+                <small class="ax-hint">默认值全1.0=不加权。例：0×1.2 2×1.1 可让强记忆更易召回</small>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5" style="border:1px solid var(--ax-border); border-radius:10px; padding:10px; background:rgba(255,255,255,.03)">
+                <label for="arcextreme-subagent-mode"><small><i class="fa-solid fa-code-branch"></i> SubAgent并发模式</small></label>
+                <select id="arcextreme-subagent-mode" class="text_pole">
+                    <option value="perRole">perRole - 每角色一次调用（角色隔离，推荐）</option>
+                    <option value="mixed">mixed - 混合15条一批（省token）</option>
+                    <option value="perEvent">perEvent - 每事件一请求（crazy 45并发）</option>
+                </select>
+                <small class="ax-hint">3魂×15=45时：perRole=3次调用，mixed≈3次，perEvent=45次并发。不计成本选perEvent</small>
+                <label class="checkbox_label marginTop5" for="arcextreme-subagent-collapse">
+                    <input type="checkbox" id="arcextreme-subagent-collapse" />
+                    <span>折叠轨迹（可选）</span>
+                    <small class="ax-hint--inline">默认关闭，不折叠靠密度排版看清；勾选后8秒内SubAgent合1</small>
+                </label>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5" style="border:1px solid rgba(139,124,246,.35); border-radius:10px; padding:10px; background:rgba(139,124,246,.06)">
+                <label class="checkbox_label" for="arcextreme-retrieved-subagent-enabled">
+                    <input type="checkbox" id="arcextreme-retrieved-subagent-enabled" />
+                    <span><i class="fa-solid fa-rotate"></i> 检索二次裁判（A1）</span>
+                    <small class="ax-hint--inline">长期库检索项也更新2bit+Why（70-100字）</small>
+                </label>
+                <small class="ax-hint">开启后：检索到的长期记忆（回填的进池 + 传统topK不进池但改分）都会走 SubAgent，适合不在乎LLM调用的你</small>
+                <div class="ax-grid ax-grid--2 marginTop5" id="arcextreme-retrieved-subagent-grid">
+                    <div class="flex-container flexFlowColumn">
+                        <label for="arcextreme-retrieved-subagent-max"><small>每轮最多裁判条数</small></label>
+                        <input type="number" id="arcextreme-retrieved-subagent-max" class="text_pole" min="1" max="20" step="1" />
+                        <small class="ax-hint">默认10，包含回填+传统topK</small>
+                    </div>
+                    <div class="flex-container alignItemsCenter">
+                        <label class="checkbox_label" for="arcextreme-retrieved-subagent-trad">
+                            <input type="checkbox" id="arcextreme-retrieved-subagent-trad" />
+                            <span>含传统检索（不进池也改分）</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <small class="ax-hint"><i class="fa-solid fa-circle-info"></i> 时间语义：短期池内事件last_active_at刷为“今天”，长期库算历史。满池时中位数删除补位参与下轮2bit</small>
+        </div>
+    </div>
+
+    <!-- SubAgent裁判 LLM -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-microchip"></i> SubAgent裁判 LLM <span class="ax-badge">2bit ±1/Skip</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label class="checkbox_label marginBot5" for="arcextreme-subagent-useextract">
+                <input type="checkbox" id="arcextreme-subagent-useextract" />
+                <span>复用提取 LLM 配置</span>
+                <small class="ax-hint--inline">开启后下方独立配置全部忽略</small>
+            </label>
+            <div class="ax-grid">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-subagent-url"><small>Base URL</small></label>
+                    <input type="text" id="arcextreme-subagent-url" class="text_pole" placeholder="留空则复用提取 LLM" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-subagent-model"><small>模型</small></label>
+                    <input type="text" id="arcextreme-subagent-model" class="text_pole" placeholder="gpt-4o-mini" />
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-subagent-key"><small>API Key</small></label>
+                <input type="password" id="arcextreme-subagent-key" class="text_pole" />
+            </div>
+            <small class="ax-hint"><i class="fa-solid fa-circle-info"></i> 对短期池每事件并发一裁判，批处理15/次，判断2bit是否`+1/-1/Skip`</small>
+            <details class="ax-adv" id="arcextreme-subagent-adv">
+                <summary class="ax-adv__summary"><i class="fa-solid fa-sliders"></i> 高级参数 <span class="ax-adv__hint">温度 / 最大回复 / 推理</span> <i class="fa-solid fa-chevron-down ax-adv__chev"></i></summary>
+                <div class="ax-adv__body">
+                    <div class="ax-grid ax-grid--2">
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-subagent-temp"><small>温度 <span class="ax-val" id="arcextreme-subagent-temp-val"></span></small></label>
+                            <div class="ax-range-wrap">
+                                <input type="range" id="arcextreme-subagent-temp" min="0" max="2" step="0.05" />
+                                <input type="number" id="arcextreme-subagent-temp-num" class="text_pole ax-range-num" min="0" max="2" step="0.05" />
+                            </div>
+                            <small class="ax-hint">默认1.0，推理模型若400错误请取消“推理时仍发温度”</small>
+                        </div>
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-subagent-maxtokens"><small>最大回复 (max tokens)</small></label>
+                            <input type="number" id="arcextreme-subagent-maxtokens" class="text_pole" min="0" max="32768" step="1" placeholder="0=不限" />
+                            <small class="ax-hint"><b>0=不限</b>；&gt;0时普通模型只算正文，推理模型算正文+推理之和</small>
+                        </div>
+                    </div>
+                    <div class="ax-grid ax-grid--2 marginTop5">
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-subagent-reasoning"><small>推理强度</small></label>
+                            <select id="arcextreme-subagent-reasoning" class="text_pole">
+                                <option value="none">none - 关闭</option>
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high</option>
+                            </select>
+                            <small class="ax-hint">仅推理模型生效</small>
+                        </div>
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-subagent-reasoning-tokens"><small>推理预算 (tokens)</small></label>
+                            <input type="number" id="arcextreme-subagent-reasoning-tokens" class="text_pole" min="0" max="32768" step="64" placeholder="0=不限" />
+                            <small class="ax-hint"><b>0=不限</b>（想推多少推多少）</small>
+                        </div>
+                    </div>
+                    <label class="checkbox_label marginTop5" for="arcextreme-subagent-sendtemp">
+                        <input type="checkbox" id="arcextreme-subagent-sendtemp" />
+                        <span>推理时仍发送温度</span>
+                    </label>
+                    <div class="flex-container flexFlowColumn marginTop5">
+                        <label for="arcextreme-subagent-timeout"><small>超时 (秒)</small></label>
+                        <input type="number" id="arcextreme-subagent-timeout" class="text_pole" min="5" max="300" step="1" placeholder="40" />
+                    </div>
+                </div>
+            </details>
+        </div>
+    </div>
+
+    <!-- 升华 LLM -->
+    <div class="inline-drawer ax-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-fire"></i> 升华 LLM <span class="ax-badge ax-badge--accent">深度推理</span></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label class="checkbox_label marginBot5" for="arcextreme-sublimate-enabled">
+                <input type="checkbox" id="arcextreme-sublimate-enabled" />
+                <span>启用升华（stuck≥阈值且0/3强态 → 追加到soul）</span>
+            </label>
+            <label class="checkbox_label marginBot5" for="arcextreme-sublimate-useextract">
+                <input type="checkbox" id="arcextreme-sublimate-useextract" />
+                <span>复用提取 LLM 配置</span>
+                <small class="ax-hint--inline">开启后下方独立配置全部忽略</small>
+            </label>
+            <div class="ax-grid">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-sublimate-url"><small>Base URL</small></label>
+                    <input type="text" id="arcextreme-sublimate-url" class="text_pole" placeholder="留空则复用提取 LLM" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-sublimate-model"><small>模型</small></label>
+                    <input type="text" id="arcextreme-sublimate-model" class="text_pole" placeholder="gpt-4o / deepseek-r1" />
+                </div>
+            </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-sublimate-key"><small>API Key</small></label>
+                <input type="password" id="arcextreme-sublimate-key" class="text_pole" />
+            </div>
+            <small class="ax-hint"><i class="fa-solid fa-circle-info"></i> 深度推理提炼稳定人设，追加到soul末尾并独立TAG注入当前扮演</small>
+            <details class="ax-adv" id="arcextreme-sublimate-adv">
+                <summary class="ax-adv__summary"><i class="fa-solid fa-sliders"></i> 高级参数 <span class="ax-adv__hint">温度 / 推理高强度</span> <i class="fa-solid fa-chevron-down ax-adv__chev"></i></summary>
+                <div class="ax-adv__body">
+                    <div class="ax-grid ax-grid--2">
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-sublimate-temp"><small>温度 <span class="ax-val" id="arcextreme-sublimate-temp-val"></span></small></label>
+                            <div class="ax-range-wrap">
+                                <input type="range" id="arcextreme-sublimate-temp" min="0" max="2" step="0.05" />
+                                <input type="number" id="arcextreme-sublimate-temp-num" class="text_pole ax-range-num" min="0" max="2" step="0.05" />
+                            </div>
+                            <small class="ax-hint">默认1.0；升华建议保持1.0让深度推理更发散</small>
+                        </div>
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-sublimate-maxtokens"><small>最大回复 (max tokens)</small></label>
+                            <input type="number" id="arcextreme-sublimate-maxtokens" class="text_pole" min="0" max="32768" step="1" placeholder="0=不限，推荐4096" />
+                            <small class="ax-hint"><b>0=不限</b>；&gt;0时推理模型算正文+推理之和，升华内容较长建议≥4096</small>
+                        </div>
+                    </div>
+                    <div class="ax-grid ax-grid--2 marginTop5">
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-sublimate-reasoning"><small>推理强度</small></label>
+                            <select id="arcextreme-sublimate-reasoning" class="text_pole">
+                                <option value="none">none - 关闭</option>
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high - 深度</option>
+                            </select>
+                            <small class="ax-hint">升华推荐high</small>
+                        </div>
+                        <div class="flex-container flexFlowColumn">
+                            <label for="arcextreme-sublimate-reasoning-tokens"><small>推理预算 (tokens)</small></label>
+                            <input type="number" id="arcextreme-sublimate-reasoning-tokens" class="text_pole" min="0" max="32768" step="64" placeholder="0=不限" />
+                            <small class="ax-hint"><b>0=不限</b>（推荐，升华让模型充分思考）</small>
+                        </div>
+                    </div>
+                    <label class="checkbox_label marginTop5" for="arcextreme-sublimate-sendtemp">
+                        <input type="checkbox" id="arcextreme-sublimate-sendtemp" />
+                        <span>推理时仍发送温度</span>
+                    </label>
+                    <div class="flex-container flexFlowColumn marginTop5">
+                        <label for="arcextreme-sublimate-timeout"><small>超时 (秒)</small></label>
+                        <input type="number" id="arcextreme-sublimate-timeout" class="text_pole" min="5" max="300" step="1" placeholder="60" />
+                    </div>
+                </div>
+            </details>
+            <hr style="border-color: var(--ax-border); margin:10px 0">
+            <div class="ax-grid ax-grid--3">
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-sublimate-position"><small>升华注入位置</small></label>
+                    <select id="arcextreme-sublimate-position" class="text_pole"></select>
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-sublimate-depth"><small>注入深度</small></label>
+                    <input type="number" id="arcextreme-sublimate-depth" class="text_pole" min="0" max="20" />
+                </div>
+                <div class="flex-container flexFlowColumn">
+                    <label for="arcextreme-sublimate-role"><small>角色</small></label>
+                    <select id="arcextreme-sublimate-role" class="text_pole"></select>
+                </div>
+            </div>
+            <label class="checkbox_label marginTop5" for="arcextreme-sublimate-wi">
+                <input type="checkbox" id="arcextreme-sublimate-wi" />
+                <span>参与世界书扫描</span>
+            </label>
+        </div>
+    </div>
+
+    <!-- 数据 -->
+    <div class="inline-drawer ax-drawer" id="arcextreme-data-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-database"></i> 数据 · Souls / 短期池 / 长期库 / 升华</b>
+            <div id="arcextreme-data-popout" class="ax-popout-btn" title="弹出大窗查看（不受侧边栏宽度限制）"><i class="fa-solid fa-up-right-from-square"></i> 弹出</div>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="ax-tabs" id="arcextreme-data-tabs">
+                <div class="ax-tab is-active" data-tab="souls">Souls</div>
+                <div class="ax-tab" data-tab="short">短期池BTB</div>
+                <div class="ax-tab" data-tab="long">长期库</div>
+                <div class="ax-tab" data-tab="sublimated">升华</div>
+            </div>
+            <div class="ax-tab-panels">
+                <div class="ax-tab-panel is-active" data-panel="souls">
+                    <div class="ax-data-card">
+                        <div class="ax-data-card__head">
+                            <span class="ax-data-card__title"><i class="fa-solid fa-ghost"></i> souls 列表</span>
+                            <div id="arcextreme-refresh-souls" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                        </div>
+                        <ul class="arcextreme-list ax-list" id="arcextreme-souls"></ul>
+                    </div>
+                </div>
+                <div class="ax-tab-panel" data-panel="short">
+                    <div class="ax-data-card">
+                        <div class="ax-data-card__head">
+                            <span class="ax-data-card__title"><i class="fa-solid fa-layer-group"></i> 短期池BTB <small id="arcextreme-short-summary" style="opacity:.6"></small></span>
+                            <div class="ax-data-card__actions">
+                                <div id="arcextreme-enforce-short" class="menu_button menu_button_icon ax-mini-btn" title="按当前 perSoulCap 立即校正（截断超额，skip>阈值优先/中位数）"><i class="fa-solid fa-scissors"></i></div>
+                                <div id="arcextreme-refresh-short" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:6px; padding:6px; flex-wrap:wrap; align-items:center">
+                            <select id="arcextreme-short-filter-soul" class="text_pole" style="min-width:120px"><option value="">全部soul</option></select>
+                            <select id="arcextreme-short-filter-counter" class="text_pole" style="width:110px"><option value="">全部2bit</option><option value="0">0强拒绝</option><option value="1">1弱拒绝</option><option value="2">2弱接纳</option><option value="3">3强接纳</option></select>
+                            <small style="opacity:.6">色块:0红1橙2蓝3绿</small>
+                        </div>
+                        <ul class="arcextreme-list ax-list" id="arcextreme-shortpool"></ul>
+                        <div id="arcextreme-shortpool-by-soul"></div>
+                    </div>
+                </div>
+                <div class="ax-tab-panel" data-panel="long">
+                    <div class="ax-data-card">
+                        <div class="ax-data-card__head">
+                            <span class="ax-data-card__title"><i class="fa-solid fa-clock-rotate-left"></i> 长期库事件 <small style="opacity:.5">路由分期同步</small></span>
+                            <div class="ax-data-card__actions" style="flex-wrap:wrap">
+                                <select id="arcextreme-long-filter-bucket" class="text_pole" style="width:110px"><option value="">全部分期</option><option value="当天">当天</option><option value="3天内">3天内</option><option value="7天内">7天内</option><option value="31天内">31天内</option><option value="3个月">3个月</option><option value="6个月">6个月</option><option value="1年内">1年内</option><option value="1年以上">1年以上</option></select>
+                                <select id="arcextreme-long-filter-soul" class="text_pole" style="width:110px"><option value="">全部soul</option></select>
+                                <select id="arcextreme-long-filter-counter" class="text_pole" style="width:130px"><option value="">全部2bit</option><option value="0">0 强拒绝</option><option value="1">1 弱拒绝</option><option value="2">2 弱接纳</option><option value="3">3 强接纳</option></select>
+                                <div id="arcextreme-refresh-events" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                                <div id="arcextreme-clear" class="menu_button menu_button_icon ax-mini-btn ax-mini-btn--danger" title="清空当前聊天"><i class="fa-solid fa-trash"></i></div>
+                            </div>
+                        </div>
+                        <ul class="arcextreme-list ax-list" id="arcextreme-events" style="max-height:520px; min-height:260px"></ul>
+                        <div style="display:flex; gap:6px; padding:6px; justify-content:center">
+                            <div id="arcextreme-long-prev" class="menu_button menu_button_icon" style="padding:4px 10px; font-size:12px">上一页</div>
+                            <small id="arcextreme-long-page" style="opacity:.6; padding:4px">1</small>
+                            <div id="arcextreme-long-next" class="menu_button menu_button_icon" style="padding:4px 10px; font-size:12px">下一页</div>
+                        </div>
+                        <small class="ax-hint" style="margin:6px"><i class="fa-solid fa-circle-info"></i> 分期同路由 `BUCKETS`：按 `time_bucket` 过滤，空为全量</small>
+                    </div>
+                </div>
+                <div class="ax-tab-panel" data-panel="sublimated">
+                    <div class="ax-data-card">
+                        <div class="ax-data-card__head">
+                            <span class="ax-data-card__title"><i class="fa-solid fa-fire"></i> 升华记录</span>
+                            <div id="arcextreme-refresh-sublimated" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                        </div>
+                        <ul class="arcextreme-list ax-list" id="arcextreme-sublimated"></ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="ax-footer">
+        <small><i class="fa-solid fa-circle-info"></i> 2bit:0强拒1弱拒2弱接3强接 · 短期池每soul≤15 · Skip>阈值驱逐否则中位数删除 · 升华stuck≥8追加soul并独立注入</small>
+    </div>
+</div>
+
+<!-- 弹出式数据库大窗（不受侧边栏宽度限制） -->
+<div id="arcextreme-data-modal" class="ax-modal" style="display:none" aria-hidden="true">
+    <div class="ax-modal__backdrop" id="arcextreme-modal-backdrop"></div>
+    <div class="ax-modal__panel" role="dialog" aria-modal="true" aria-label="ArcEXtreme 数据库查看">
+        <div class="ax-modal__header">
+            <div class="ax-modal__title">
+                <b><i class="fa-solid fa-database"></i> 数据库查看</b>
+                <small class="ax-modal__subtitle">不受侧边栏限制 · 支持全宽检索与筛选</small>
+            </div>
+            <div class="ax-modal__actions">
+                <div id="arcextreme-modal-refresh-all" class="menu_button menu_button_icon" title="刷新全部"><i class="fa-solid fa-rotate"></i> 刷新全部</div>
+                <div id="arcextreme-modal-close" class="menu_button menu_button_icon ax-modal__close" title="关闭 (Esc)"><i class="fa-solid fa-xmark"></i></div>
+            </div>
+        </div>
+        <div class="ax-tabs" id="arcextreme-modal-tabs">
+            <div class="ax-tab is-active" data-tab="souls"><i class="fa-solid fa-ghost"></i> Souls</div>
+            <div class="ax-tab" data-tab="short"><i class="fa-solid fa-layer-group"></i> 短期池BTB</div>
+            <div class="ax-tab" data-tab="long"><i class="fa-solid fa-clock-rotate-left"></i> 长期库</div>
+            <div class="ax-tab" data-tab="sublimated"><i class="fa-solid fa-fire"></i> 升华</div>
+            <span style="flex:1"></span>
+            <small style="opacity:.55; font-size:11px; align-self:center; white-space:nowrap"><i class="fa-regular fa-keyboard"></i> Esc 关闭 · 点击遮罩关闭</small>
+        </div>
+        <div class="ax-modal__body">
+            <!-- Souls -->
+            <div class="ax-tab-panel is-active" data-panel="souls" id="arcextreme-modal-panel-souls">
+                <div class="ax-data-card">
+                    <div class="ax-data-card__head">
+                        <span class="ax-data-card__title"><i class="fa-solid fa-ghost"></i> souls 列表</span>
+                        <div id="arcextreme-modal-refresh-souls" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                    </div>
+                    <ul class="arcextreme-list ax-list" id="arcextreme-modal-souls"></ul>
+                </div>
+            </div>
+            <!-- 短期池 -->
+            <div class="ax-tab-panel" data-panel="short" id="arcextreme-modal-panel-short">
+                <div class="ax-data-card">
+                    <div class="ax-data-card__head">
+                        <span class="ax-data-card__title"><i class="fa-solid fa-layer-group"></i> 短期池BTB <small id="arcextreme-modal-short-summary" style="opacity:.6"></small></span>
+                        <div class="ax-data-card__actions">
+                            <div id="arcextreme-modal-enforce" class="menu_button menu_button_icon ax-mini-btn" title="按当前 perSoulCap 立即校正"><i class="fa-solid fa-scissors"></i></div>
+                            <div id="arcextreme-modal-refresh-short" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:8px; padding:8px; flex-wrap:wrap; align-items:center; background:rgba(255,255,255,.03); border-bottom:1px solid var(--ax-border)">
+                        <select id="arcextreme-modal-short-filter-soul" class="text_pole" style="min-width:140px"><option value="">全部soul</option></select>
+                        <select id="arcextreme-modal-short-filter-counter" class="text_pole" style="width:130px"><option value="">全部2bit</option><option value="0">0强拒绝</option><option value="1">1弱拒绝</option><option value="2">2弱接纳</option><option value="3">3强接纳</option></select>
+                        <small style="opacity:.6">色块:0红1橙2蓝3绿</small>
+                        <span style="flex:1"></span>
+                        <small style="opacity:.45">模态框独立筛选，不影响侧边栏</small>
+                    </div>
+                    <ul class="arcextreme-list ax-list" id="arcextreme-modal-shortpool"></ul>
+                </div>
+            </div>
+            <!-- 长期库 -->
+            <div class="ax-tab-panel" data-panel="long" id="arcextreme-modal-panel-long">
+                <div class="ax-data-card">
+                    <div class="ax-data-card__head">
+                        <span class="ax-data-card__title"><i class="fa-solid fa-clock-rotate-left"></i> 长期库事件</span>
+                        <div class="ax-data-card__actions" style="flex-wrap:wrap">
+                            <select id="arcextreme-modal-long-filter-bucket" class="text_pole" style="width:120px"><option value="">全部分期</option><option value="当天">当天</option><option value="3天内">3天内</option><option value="7天内">7天内</option><option value="31天内">31天内</option><option value="3个月">3个月</option><option value="6个月">6个月</option><option value="1年内">1年内</option><option value="1年以上">1年以上</option></select>
+                            <select id="arcextreme-modal-long-filter-soul" class="text_pole" style="width:130px"><option value="">全部soul</option></select>
+                            <select id="arcextreme-modal-long-filter-counter" class="text_pole" style="width:140px"><option value="">全部2bit</option><option value="0">0 强拒绝</option><option value="1">1 弱拒绝</option><option value="2">2 弱接纳</option><option value="3">3 强接纳</option></select>
+                            <div id="arcextreme-modal-refresh-events" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                            <div id="arcextreme-modal-clear" class="menu_button menu_button_icon ax-mini-btn ax-mini-btn--danger" title="清空当前聊天"><i class="fa-solid fa-trash"></i></div>
+                        </div>
+                    </div>
+                    <ul class="arcextreme-list ax-list" id="arcextreme-modal-events" style="min-height:340px"></ul>
+                    <div style="display:flex; gap:8px; padding:10px; justify-content:center; align-items:center; border-top:1px solid var(--ax-border)">
+                        <div id="arcextreme-modal-long-prev" class="menu_button menu_button_icon" style="padding:6px 14px; font-size:12px"><i class="fa-solid fa-chevron-left"></i> 上一页</div>
+                        <small id="arcextreme-modal-long-page" style="opacity:.7; padding:4px 10px; background:rgba(255,255,255,.06); border-radius:20px; font-weight:700">1 · 0条</small>
+                        <div id="arcextreme-modal-long-next" class="menu_button menu_button_icon" style="padding:6px 14px; font-size:12px">下一页 <i class="fa-solid fa-chevron-right"></i></div>
+                    </div>
+                    <small class="ax-hint" style="margin:8px"><i class="fa-solid fa-circle-info"></i> 分期同路由 `BUCKETS`：按 `time_bucket` 过滤，模态框与侧边栏分页独立</small>
+                </div>
+            </div>
+            <!-- 升华 -->
+            <div class="ax-tab-panel" data-panel="sublimated" id="arcextreme-modal-panel-sublimated">
+                <div class="ax-data-card">
+                    <div class="ax-data-card__head">
+                        <span class="ax-data-card__title"><i class="fa-solid fa-fire"></i> 升华记录</span>
+                        <div id="arcextreme-modal-refresh-sublimated" class="menu_button menu_button_icon ax-mini-btn" title="刷新"><i class="fa-solid fa-rotate"></i></div>
+                    </div>
+                    <ul class="arcextreme-list ax-list" id="arcextreme-modal-sublimated"></ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
