@@ -1,6 +1,6 @@
 <div class="arcextreme-panel">
-    <!-- Hero / Header -->
-    <div class="ax-hero">
+    <!-- Hero / Header — 漂漂亮亮的渐变大标题，可折叠 -->
+    <div class="ax-hero ax-hero--collapsible" id="arcextreme-hero" title="点击折叠/展开整个面板">
         <div class="ax-hero__left">
             <div class="ax-hero__icon"><i class="fa-solid fa-brain"></i></div>
             <div class="ax-hero__text">
@@ -14,8 +14,10 @@
                 <span class="ax-status__label" id="arcextreme-status-label">未检测</span>
             </div>
         </div>
+        <div class="ax-hero__chev inline-drawer-icon fa-solid fa-circle-chevron-down down" id="arcextreme-hero-chev"></div>
     </div>
 
+    <div id="arcextreme-hero-body" class="ax-hero-body">
     <!-- 折叠控制条 -->
     <div class="ax-controls">
         <div class="menu_button menu_button_icon" id="arcextreme-expand-all" title="全部展开"><i class="fa-solid fa-angles-down"></i> 展开</div>
@@ -841,6 +843,7 @@
     <div class="ax-footer">
         <small><i class="fa-solid fa-circle-info"></i> 2bit:0强拒1弱拒2弱接3强接 · 短期池每soul≤15 · Skip>阈值驱逐否则中位数删除 · 升华stuck≥8追加soul并独立注入</small>
     </div>
+    </div> <!-- /ax-hero-body -->
 </div>
 
 <!-- 弹出式数据库大窗（不受侧边栏宽度限制） -->

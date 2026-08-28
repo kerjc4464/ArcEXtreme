@@ -1613,6 +1613,22 @@ function bindForm() {
         }
     }catch(e){ console.warn('[ArcEXtreme] modal 移到 body 失败', e); }
     try{ setupDataModal(); }catch(e){ console.warn('[ArcEXtreme] modal setup 失败', e); }
+
+    // Hero 大标题折叠 — 漂漂亮亮的渐变也可收起
+    try{
+        const hero = document.getElementById('arcextreme-hero');
+        const panel = document.querySelector('.arcextreme-panel');
+        const storageKey = 'arcextreme-hero-collapsed';
+        try{ if (localStorage.getItem(storageKey)==='1' && panel) panel.classList.add('is-hero-collapsed'); }catch{}
+        if (hero && panel) {
+            hero.addEventListener('click', (e)=>{
+                if (e.target.closest('.ax-status')) return;
+                panel.classList.toggle('is-hero-collapsed');
+                const collapsed = panel.classList.contains('is-hero-collapsed');
+                try{ localStorage.setItem(storageKey, collapsed?'1':'0'); }catch{}
+            });
+        }
+    }catch(e){ console.warn('[ArcEXtreme] hero collapse setup 失败', e); }
 }
 
 // --------------------------------------------------------------------------- //
