@@ -20,3 +20,9 @@ arcextreme.db
 souls/*.tmp
 souls/.souls_enabled.json
 ArcEXtreme-BackEnd/souls/.souls_enabled.json
+
+# Souls - private character definitions, do not commit
+souls/
+Soul/
+Souls/
+ArcEXtreme-BackEnd/souls/
