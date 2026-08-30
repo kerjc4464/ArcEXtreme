@@ -386,7 +386,7 @@
 .ax-modal[style*="display:none"] { display: none !important; }
 .ax-modal__backdrop { position: absolute; inset: 0; background: rgba(8,10,18,.68); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
 .ax-modal__panel {
-    position: relative; z-index: 1;
+    position: relative; z-index: 1; box-sizing: border-box;
     width: 94vw; max-width: 1120px; height: 88vh; max-height: 900px;
     display: flex; flex-direction: column; overflow: hidden;
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 96%, #1a1d2a 100%);
@@ -411,7 +411,7 @@
 #arcextreme-modal-tabs { margin: 10px 12px 0; flex-shrink: 0; }
 #arcextreme-modal-tabs .ax-tab { padding: 7px 14px; font-size: 13px; }
 .ax-modal__body {
-    flex: 1; overflow-y: auto; overflow-x: hidden;
+    flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
     padding: 12px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 98%, transparent);
     display: flex; flex-direction: column; gap: 0;
 }
@@ -432,10 +432,68 @@
 .ax-modal__body::-webkit-scrollbar { width: 8px; }
 .ax-modal__body::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 99px; }
 .ax-modal__body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.18); }
+/* ---- 手机端数据库大窗适配：修复弹出跑版 ---- */
+@media (max-width: 768px){
+    .ax-modal { padding: 8px; align-items: stretch; padding-top: max(8px, env(safe-area-inset-top)); padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+    .ax-modal__panel { width: 100%; max-width: none; height: calc(100vh - 16px); height: calc(100dvh - 16px); max-height: none; border-radius: 14px; }
+    .ax-modal__header { flex-wrap: wrap; padding: 10px 12px; gap: 8px; }
+    .ax-modal__title { flex: 1 1 100%; min-width: 0; gap: 8px; }
+    .ax-modal__title b { font-size: 14px; }
+    .ax-modal__subtitle { font-size: 10px; max-width: 100%; white-space: normal; line-height: 1.4; }
+    .ax-modal__actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+    #arcextreme-modal-tabs { margin: 8px 8px 0; gap: 4px; padding: 3px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    #arcextreme-modal-tabs::-webkit-scrollbar { display: none; }
+    #arcextreme-modal-tabs .ax-tab { padding: 6px 10px; font-size: 12px; flex-shrink: 0; }
+    #arcextreme-modal-tabs small { display: none; }
+    .ax-modal__body { padding: 8px; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+    .ax-modal__body .ax-data-card { min-height: auto; max-width: 100%; overflow: hidden; }
+    .ax-modal__body .ax-data-card__head { flex-wrap: wrap; gap: 8px; padding: 8px 10px; align-items: flex-start; }
+    .ax-modal__body .ax-data-card__head .ax-data-card__title { flex: 1 1 auto; min-width: 0; font-size: 12px; }
+    .ax-modal__body .ax-data-card__head .ax-data-card__actions { flex: 1 1 100%; width: 100%; justify-content: flex-start; flex-wrap: wrap; gap: 6px; }
+    .ax-modal__body .ax-data-card__head .ax-data-card__actions .text_pole,
+    .ax-modal__body select.text_pole { flex: 1 1 120px !important; width: auto !important; min-width: 0 !important; max-width: 100%; }
+    /* 兼容内联 style 的筛选条：短期池/长期库下方的 flex 条 */
+    .ax-modal__body .ax-data-card > div[style*="display:flex"] { flex-wrap: wrap !important; gap: 6px !important; padding: 8px !important; }
+    .ax-modal__body .ax-data-card > div[style*="display:flex"] select.text_pole { flex: 1 1 120px !important; width: auto !important; min-width: 0 !important; }
+    .ax-modal__body .ax-list.arcextreme-list { padding: 6px; gap: 6px; }
+    .ax-modal__body .ax-list li { flex-wrap: wrap; gap: 6px; padding: 8px 10px; align-items: flex-start; min-width: 0; }
+    .ax-modal__body .ax-list li .tag { flex-shrink: 0; }
+    .ax-modal__body .ax-counter-badge { flex-shrink: 0; }
+    .ax-modal__body .ax-list li .ax-event__text { flex: 1 1 100%; min-width: 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; word-break: break-word; }
+    .ax-modal__body .ax-list li .score { margin-left: auto; flex-shrink: 0; }
+    .ax-modal__body .ax-list li .ax-event__meta { flex-wrap: wrap; gap: 4px !important; max-width: 100%; overflow-wrap: anywhere; }
+    .ax-modal__body .text_pole { box-sizing: border-box; max-width: 100%; }
+    /* iOS 防止聚焦缩放，保持 16px 避免跑版抖动；其他端保持 14px 视觉一致 */
+    .ax-modal__body select.text_pole, .ax-modal__body input.text_pole { font-size: 16px; }
+    .ax-modal__body .ax-list li .ax-event__text small { max-width: 100%; overflow-wrap: anywhere; }
+}
 @media (max-width: 640px){
-    .ax-modal { padding: 8px; }
-    .ax-modal__panel { width: 98vw; height: 92vh; border-radius: 14px; }
+    .ax-modal { padding: 6px; }
+    .ax-modal__panel { width: 100%; height: calc(100vh - 12px); height: calc(100dvh - 12px); border-radius: 12px; }
     .ax-modal__header { padding: 10px 12px; }
+    #arcextreme-modal-tabs .ax-tab { padding: 5px 9px; font-size: 11px; }
+    .ax-modal__body .ax-data-card__head .ax-data-card__actions .text_pole,
+    .ax-modal__body select.text_pole { flex: 1 1 100px !important; }
+}
+@media (max-width: 480px){
+    .ax-modal { padding: 4px; }
+    .ax-modal__panel { height: calc(100vh - 8px); height: calc(100dvh - 8px); border-radius: 10px; }
+    .ax-modal__header { padding: 8px 10px; }
+    .ax-modal__title b { font-size: 13px; }
+    .ax-modal__actions .menu_button { padding: 4px 8px; font-size: 11px; }
+    #arcextreme-modal-tabs { margin: 6px 6px 0; }
+    .ax-modal__body { padding: 6px; }
+    .ax-modal__body .ax-data-card { border-radius: 10px; }
+    .ax-modal__body .ax-data-card__head { padding: 6px 8px; }
+    .ax-modal__body .ax-data-card__head .ax-data-card__actions { gap: 4px; }
+    .ax-modal__body .ax-data-card__head .ax-data-card__actions .text_pole,
+    .ax-modal__body select.text_pole { flex: 1 1 100% !important; }
+    .ax-modal__body .ax-data-card > div[style*="display:flex"] select.text_pole { flex: 1 1 100% !important; }
+    .ax-modal__body .ax-list.arcextreme-list { padding: 4px; }
+    .ax-modal__body .ax-list li { padding: 7px 8px; }
+    .ax-modal__body .ax-event__text { font-size: 12px; }
+    /* 分页条在极窄屏换行居中 */
+    .ax-modal__body .ax-data-card > div[style*="justify-content:center"] { flex-wrap: wrap; gap: 6px !important; padding: 8px !important; }
 }
 /* Soul 启用开关 */
 .ax-soul__row { align-items: center !important; }
