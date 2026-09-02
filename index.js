@@ -119,7 +119,7 @@ function isValidChatId(id){
 }
 
 // --------------------------------------------------------------------------- //
-// 主开关：关了就全关 — 清除所有注入并阻断后续链路
+// 主开关：关闭后全部停用 — 清除所有注入并阻断后续链路
 // --------------------------------------------------------------------------- //
 async function clearAllMemoryInjections() {
     const s = S();
@@ -1660,7 +1660,7 @@ function bindForm() {
     setTimeout(updateLocks, 0);
     setTimeout(()=>{ try{ updateMasterUI(!!S().enabled); }catch{} }, 150);
 
-    // 主开关单独接管：关了就全关（清注入 + 置灰 + 阻断）
+    // 主开关单独接管：关闭后全部停用（清注入 + 置灰 + 阻断）
     const masterEl = document.getElementById('arcextreme-enabled');
     if (masterEl) masterEl.addEventListener('change', async () => {
         const v = masterEl.checked;

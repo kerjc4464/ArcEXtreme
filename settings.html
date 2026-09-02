@@ -1,10 +1,10 @@
 <div class="arcextreme-panel">
-    <!-- Hero / Header — 漂漂亮亮的渐变大标题，可折叠 -->
+    <!-- Hero / Header — 哑光低调，可折叠 -->
     <div class="ax-hero ax-hero--collapsible" id="arcextreme-hero" title="点击折叠/展开整个面板">
         <div class="ax-hero__left">
             <div class="ax-hero__icon"><i class="fa-solid fa-brain"></i></div>
             <div class="ax-hero__text">
-                <div class="ax-hero__title">ArcEXtreme <span class="ax-hero__ver">v0.1</span></div>
+                <div class="ax-hero__title">ArcEXtreme <span class="ax-hero__ver">v0.2.0</span></div>
                 <div class="ax-hero__sub">Dynamic DE_RLHF</div>
             </div>
         </div>
@@ -49,12 +49,11 @@
 
     <!-- 顶部快捷操作条 -->
     <div class="ax-quickbar">
-        <label class="ax-switch ax-switch--master" title="主开关 — 关了就全关（提炼/裁判/路由/检索/注入/升华全部停用）">
+        <label class="ax-switch ax-switch--master" title="主开关 — 关闭后全部链路停用（提炼/裁判/路由/检索/注入/升华）">
             <input type="checkbox" id="arcextreme-enabled" />
             <span class="ax-switch__slider"></span>
             <span class="ax-switch__label"><i class="fa-solid fa-power-off"></i> 主开关</span>
         </label>
-        <small class="ax-master-hint" title="关闭后全部链路暂停，已注入的记忆也会立即清除">关了就全关</small>
         <label class="checkbox_label ax-quickbar__check" title="在控制台与日志面板输出调试信息">
             <input type="checkbox" id="arcextreme-debug" />
             <span><i class="fa-solid fa-bug"></i> 调试日志</span>
@@ -65,7 +64,7 @@
             <div id="arcextreme-rebuild" class="menu_button menu_button_icon ax-btn--ghost" title="重建向量索引"><i class="fa-solid fa-rotate"></i> 重建索引</div>
         </div>
     </div>
-    <!-- 主开关关闭横幅：关了就全关 -->
+    <!-- 主开关关闭横幅 -->
     <div id="arcextreme-master-off-banner" class="ax-master-off-banner" style="display:none">
         <i class="fa-solid fa-power-off"></i>
         <span>主开关已关闭 — 全部记忆链路已停用</span>
