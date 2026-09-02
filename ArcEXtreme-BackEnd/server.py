@@ -594,11 +594,75 @@ def read_soul(filename: str):
 
 @app.post("/api/souls/append")
 def append_soul(payload: SoulAppend):
-    full = safe_soul_path(payload.filename)
+    # 解析文件名并做 .txt→.json 自动迁移兼容
+    requested = safe_soul_path(payload.filename)
+    # 若请求的是 .txt 但同名 .json 已存在（纯JSON迁移后），自动落到 .json
+    full = requested
+    try:
+        base_name = os.path.basename(requested)
+        if base_name.lower().endswith('.txt'):
+            alt = base_name[:-4] + '.json'
+            alt_full = os.path.join(SOULS_DIR, alt)
+            if os.path.isfile(alt_full):
+                full = alt_full
+            elif os.path.isfile(requested):
+                full = requested
+            else:
+                # 两者都不存在，优先落 .json
+                full = alt_full
+        elif base_name.lower().endswith('.json'):
+            full = requested
+    except:
+        full = requested
     # ensure file exists
     if not os.path.isfile(full):
         # create if not exists
         open(full, "a", encoding="utf-8").close()
+    # JSON 优先：若是 .json 且内容为合法 JSON，则以纯 JSON 追加 sublimated 数组
+    is_json = str(full).lower().endswith('.json')
+    if is_json:
+        try:
+            with open(full, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+                data = _json.loads(raw) if raw else {}
+            if not isinstance(data, dict):
+                data = {"character": data}
+            if "sublimated" not in data or not isinstance(data["sublimated"], list):
+                data["sublimated"] = []
+            # 去重：同 title+content 已存在则跳过
+            exists = any((x.get("title")==payload.title and x.get("content")==payload.content) for x in data["sublimated"])
+            if not exists:
+                entry = {
+                    "title": payload.title or "",
+                    "content": payload.content or "",
+                    "counter": payload.counter,
+                    "event_id": payload.event_id,
+                    "soul": payload.soul,
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    "ts": time.time()*1000,
+                }
+                data["sublimated"].append(entry)
+                # 写回
+                with soul_lock:
+                    with open(full, "w", encoding="utf-8") as f:
+                        _json.dump(data, f, ensure_ascii=False, indent=2)
+                    # also record in sublimated table if chat_id/soul provided
+                    if payload.chat_id and payload.soul:
+                        try:
+                            conn = get_db()
+                            conn.execute("INSERT INTO sublimated(chat_id,soul,event_id,counter,title,content,created_at) VALUES (?,?,?,?,?,?,?)",
+                                (payload.chat_id, payload.soul, payload.event_id, payload.counter, payload.title, payload.content, time.time()*1000))
+                            conn.commit()
+                            conn.close()
+                        except Exception as e:
+                            print(f"[append_soul] sublimated insert failed: {e}")
+                    return {"ok": True, "path": full, "mode": "json"}
+            else:
+                return {"ok": True, "path": full, "mode": "json", "note": "duplicate skipped"}
+        except Exception as e:
+            # JSON 解析失败则回退到旧的 marker 追加
+            print(f"[append_soul] json append failed, fallback to text: {e}")
+            pass
     marker = f"\n\n<!-- ArcEXtreme Sublimated {time.strftime('%Y-%m-%d %H:%M:%S')} soul={payload.soul or ''} counter={payload.counter if payload.counter is not None else ''} event={payload.event_id or ''} -->\n"
     if payload.title:
         block = f"{marker}## {payload.title}\n{payload.content}\n"

@@ -7,7 +7,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "ArcEXtreme",
-  "version": "0.1.0",
-  "homePage": "",
+  "version": "0.2.0",
+  "homePage": "https://github.com/kerjc4464/ArcEXtreme",
   "description": "基于事件提取 + 时间分桶 + 向量检索 + Rerank 的记忆增强扩展。"
 }
