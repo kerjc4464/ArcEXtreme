@@ -29,8 +29,9 @@ function getBackendBase() {
 
 async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 30) {
     const backendBase = getBackendBase();
-    const { _source, ...cleanPayload } = payload || {};
+    const { _source, _session_id, ...cleanPayload } = payload || {};
     const source = _source || 'openai';
+    const session_id = _session_id || getOpencodeSessionId();
     try {
         const proxyRes = await fetch(`${backendBase}/api/embedding_proxy`, {
             method: 'POST',
@@ -41,6 +42,7 @@ async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 30) {
                 payload: cleanPayload,
                 source,
                 timeout,
+                session_id,
             }),
         });
         if (proxyRes.status === 404) {
@@ -58,6 +60,26 @@ async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 30) {
         }
         throw e;
     }
+}
+
+function getOpencodeSessionId() {
+    try {
+        const ctx = window.SillyTavern?.getContext?.() || null;
+        const chatId = ctx?.chatId;
+        if (chatId) {
+            const s = String(chatId).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+            if (s) return s.startsWith('arcextreme-') ? s : `arcextreme-${s}`;
+        }
+    } catch {}
+    try {
+        const KEY = 'arcextreme_opencode_session';
+        const old = localStorage.getItem(KEY);
+        if (old && String(old).startsWith('arcextreme-')) return old;
+        const hex = Math.random().toString(16).slice(2, 14).padEnd(12, '0');
+        const sid = `arcextreme-${hex}`;
+        localStorage.setItem(KEY, sid);
+        return sid;
+    } catch { return 'arcextreme-backend'; }
 }
 
 export async function embedTexts(cfg, texts) {

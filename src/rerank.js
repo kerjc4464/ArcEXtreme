@@ -46,11 +46,26 @@ export async function rerank(cfg, query, documents) {
 
     // 优先走后端代理
     const backendBase = getBackendBase();
+    let session_id = null;
+    try {
+        const ctx = window.SillyTavern?.getContext?.() || null;
+        const chatId = ctx?.chatId;
+        if (chatId) {
+            const s = String(chatId).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+            session_id = s ? (s.startsWith('arcextreme-') ? s : `arcextreme-${s}`) : null;
+        }
+    } catch {}
+    if (!session_id) {
+        try {
+            const KEY = 'arcextreme_opencode_session';
+            session_id = localStorage.getItem(KEY) || 'arcextreme-backend';
+        } catch { session_id = 'arcextreme-backend'; }
+    }
     const tryProxy = async () => {
         const proxyRes = await fetch(`${backendBase}/api/rerank_proxy`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: cfg.apiUrl, api_key: cfg.apiKey || '', payload: body }),
+            body: JSON.stringify({ url: cfg.apiUrl, api_key: cfg.apiKey || '', payload: body, session_id }),
         });
         if (proxyRes.status === 404) {
             const txt = await proxyRes.clone().text().catch(()=> '');

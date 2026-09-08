@@ -4,6 +4,7 @@ import sqlite3
 import ipaddress
 import urllib.parse
 import threading
+import uuid
 import json as _json
 import base64
 import numpy as np
@@ -143,8 +144,60 @@ def init_db():
         created_at REAL NOT NULL
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sublimated_chat_soul ON sublimated(chat_id, soul)")
+    # OpenCode Go 会话 ID 持久化（kv_config）：缺前端透传时兜底复用
+    conn.execute("""CREATE TABLE IF NOT EXISTS kv_config(
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )""")
     conn.commit()
     conn.close()
+
+def _get_or_create_backend_session_id() -> str:
+    """后端常驻会话 ID：存 kv_config.opencodeSessionId，首次生成后复用。
+
+    背景：2026-09-06 起 opencode.ai/zen/go 强制要求 x-opencode-session，
+    缺失直接 HTTP 400 MissingSessionID。单机固定一个 ID 即可过校验；
+    前端透传 arcextreme-{chatId} 时优先用前端的（同聊天/同任务重试保持不变）。
+    """
+    try:
+        conn = get_db()
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS kv_config(
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )""")
+            row = conn.execute("SELECT value FROM kv_config WHERE key='opencodeSessionId'").fetchone()
+            if row and row["value"]:
+                return str(row["value"])
+            sid = f"arcextreme-{uuid.uuid4().hex[:12]}"
+            conn.execute("INSERT OR REPLACE INTO kv_config(key, value) VALUES ('opencodeSessionId', ?)", (sid,))
+            conn.commit()
+            return sid
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return "arcextreme-backend"
+
+def _opencode_forward_headers(base_url: str, api_key: Optional[str], session_id: Optional[str] = None) -> Dict[str, str]:
+    """组装上游转发头：仅 opencode.ai 加 x-opencode-session + x-opencode-client。
+
+    其他厂商（OpenAI 官端 / siliconflow / Ollama / 本地）原样不动，避免污染。
+    session_id 优先用前端透传，否则用后端常驻兜底 ID（绝不每次随机）。
+    """
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        if base_url and "opencode.ai" in str(base_url):
+            sid = (str(session_id).strip() if session_id else "") or _get_or_create_backend_session_id()
+            headers["x-opencode-session"] = sid
+            headers["x-opencode-client"] = "ArcEXtreme"
+    except Exception:
+        pass
+    return headers
 
 def get_bucket(ts_ms: float) -> str:
     days = (time.time() * 1000 - ts_ms) / 86400000.0
@@ -476,6 +529,7 @@ class RerankProxy(BaseModel):
     url: str
     api_key: Optional[str] = None
     payload: dict
+    session_id: Optional[str] = None
 
 class LLMProxy(BaseModel):
     url: str
@@ -483,6 +537,7 @@ class LLMProxy(BaseModel):
     payload: Dict[str, Any]
     timeout: Optional[int] = 90
     verify_ssl: Optional[bool] = False
+    session_id: Optional[str] = None
 
 class EmbeddingProxy(BaseModel):
     url: str
@@ -491,6 +546,7 @@ class EmbeddingProxy(BaseModel):
     source: Optional[str] = 'openai'
     timeout: Optional[int] = 30
     verify_ssl: Optional[bool] = False
+    session_id: Optional[str] = None
 
 # --------------------------------------------------------------------------- #
 # Souls
@@ -1815,9 +1871,7 @@ async def llm_proxy(payload: LLMProxy):
         if _is_private_url(base):
             logger.warning(f"[llm_proxy] forwarding to private address: {base}")
     except: pass
-    headers = {"Content-Type": "application/json"}
-    if payload.api_key:
-        headers["Authorization"] = f"Bearer {payload.api_key}"
+    headers = _opencode_forward_headers(base, payload.api_key, payload.session_id)
     timeout = payload.timeout or 90
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=payload.verify_ssl) as client:
@@ -1849,9 +1903,7 @@ async def embedding_proxy(payload: EmbeddingProxy):
     else:
         if not base.endswith("/embeddings"):
             base = base + "/embeddings"
-    headers = {"Content-Type": "application/json"}
-    if payload.api_key:
-        headers["Authorization"] = f"Bearer {payload.api_key}"
+    headers = _opencode_forward_headers(base, payload.api_key, payload.session_id)
     timeout = payload.timeout or 30
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=payload.verify_ssl) as client:
@@ -1877,9 +1929,7 @@ async def rerank_proxy(payload: RerankProxy):
         if _is_private_url(url):
             logger.warning(f"[rerank_proxy] forwarding to private address: {url}")
     except: pass
-    headers = {"Content-Type": "application/json"}
-    if payload.api_key:
-        headers["Authorization"] = f"Bearer {payload.api_key}"
+    headers = _opencode_forward_headers(url, payload.api_key, payload.session_id)
     try:
         async with httpx.AsyncClient(timeout=40, verify=False) as client:
             r = await client.post(url, json=payload.payload, headers=headers)

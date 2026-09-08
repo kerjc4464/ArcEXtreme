@@ -18,6 +18,54 @@ function getTraceSync() {
     return _traceMod && _traceMod.beginTrace ? _traceMod : { beginTrace: () => null, finishTraceOk: () => {}, finishTraceFail: () => {}, traceStore: [] };
 }
 
+// OpenCode Go 会话 ID：同聊天复用同一 ID，同次 chatCompletion（含降级重试）保持不变。
+// 规则：opts.session_id/sessionId 优先 > 当前 ST chatId > 浏览器持久化兜底；绝不每次随机。
+function sanitizeSessionId(raw) {
+    let s = String(raw || '').trim();
+    if (!s) return '';
+    s = s.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+    if (!s) return '';
+    if (!s.startsWith('arcextreme-')) s = `arcextreme-${s}`;
+    return s.slice(0, 80);
+}
+function getBrowserFallbackSessionId() {
+    const KEY = 'arcextreme_opencode_session';
+    try {
+        const old = localStorage.getItem(KEY);
+        if (old && sanitizeSessionId(old)) return sanitizeSessionId(old);
+    } catch {}
+    const hex = (() => {
+        try {
+            const b = new Uint8Array(6);
+            (window.crypto || {}).getRandomValues?.(b);
+            if (b.some(x => x !== 0)) return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+        } catch {}
+        return Math.random().toString(16).slice(2, 14).padEnd(12, '0');
+    })();
+    const sid = `arcextreme-${hex}`;
+    try { localStorage.setItem(KEY, sid); } catch {}
+    return sid;
+}
+function resolveOpencodeSessionId(opts = {}) {
+    const explicit = opts.session_id ?? opts.sessionId ?? opts.opencodeSessionId;
+    if (explicit && sanitizeSessionId(explicit)) return sanitizeSessionId(explicit);
+    // 当前 ST 聊天：一句话按 chatId 隔离，后端 Go 侧缓存亲和更好
+    try {
+        const ctx = window.SillyTavern?.getContext?.() || null;
+        const chatId = ctx?.chatId;
+        if (chatId && sanitizeSessionId(chatId)) return sanitizeSessionId(chatId);
+    } catch {}
+    try {
+        const m = String(window.location.hash || '').match(/chat[_-]?id=([^&]+)/i);
+        if (m && m[1] && sanitizeSessionId(decodeURIComponent(m[1]))) return sanitizeSessionId(decodeURIComponent(m[1]));
+    } catch {}
+    return getBrowserFallbackSessionId();
+}
+function isMissingSessionError(text) {
+    const lower = String(text || '').toLowerCase();
+    return lower.includes('missingsessionid') || lower.includes('x-opencode-session');
+}
+
 function getBackendBase() {
     try {
         const s = window.extension_settings?.[SETTINGS_KEY];
@@ -90,7 +138,7 @@ function buildBody(cfg, messages, opts) {
 }
 
 // 核心：狠狠走后端代理，彻底规避 CORS（不再回退直连）
-async function doFetch(bodyObj, cfg, directUrl, directHeaders) {
+async function doFetch(bodyObj, cfg, directUrl, directHeaders, sessionId) {
     const backendBase = getBackendBase();
     const proxyUrl = `${backendBase}/api/llm_proxy`;
     const timeout = Number(cfg.timeout ?? 40) || 40;
@@ -104,6 +152,7 @@ async function doFetch(bodyObj, cfg, directUrl, directHeaders) {
                 payload: bodyObj,
                 timeout,
                 verify_ssl: false,
+                session_id: sessionId || undefined,
             }),
         });
         if (proxyRes.status === 404) {
@@ -155,12 +204,22 @@ export async function chatCompletion(cfg, messages, opts = {}) {
     if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
 
     let { body, isReasoning } = buildBody(cfg, messages, mergedOpts);
+    // 会话 ID 本次调用算一次，重试全程复用（任务要求：不要每次请求随机生成）
+    const opencodeSessionId = resolveOpencodeSessionId(opts);
 
     try {
-        let res = await doFetch(body, cfg, url, headers);
+        let res = await doFetch(body, cfg, url, headers, opencodeSessionId);
 
         if (!res.ok) {
             const txt = await res.text().catch(() => '');
+            // MissingSessionID 也是 400，但不是推理参数不兼容：直接抛错，跳过降级循环
+            if (res.status === 400 && isMissingSessionError(txt)) {
+                if (traceId) {
+                    const tm = traceMod || getTraceSync();
+                    try { tm.finishTraceFail(traceId, txt.slice(0, 800), txt); } catch {}
+                }
+                throw new Error(`LLM 400 MissingSessionID（缺 x-opencode-session）：${txt.slice(0, 400)}。已跳过参数降级，请检查后端是否已更新（需转发该请求头）。`);
+            }
             const lower = txt.toLowerCase();
             const needsRetry =
                 res.status === 400 &&
@@ -196,9 +255,17 @@ export async function chatCompletion(cfg, messages, opts = {}) {
 
                 let retriedOk = false;
                 for (const b of tryBodies) {
-                    const r2 = await doFetch(b, cfg, url, headers);
+                    const r2 = await doFetch(b, cfg, url, headers, opencodeSessionId);
                     if (r2.ok) { res = r2; body = b; retriedOk = true; break; }
                     const t2 = await r2.text().catch(() => '');
+                    // 降级重试中若撞上 MissingSessionID：同样直接抛，不继续剥参数
+                    if (r2.status === 400 && isMissingSessionError(t2)) {
+                        if (traceId) {
+                            const tm = traceMod || getTraceSync();
+                            try { tm.finishTraceFail(traceId, t2.slice(0, 800), t2); } catch {}
+                        }
+                        throw new Error(`LLM 400 MissingSessionID（缺 x-opencode-session）：${t2.slice(0, 400)}。已跳过参数降级，请检查后端是否已更新（需转发该请求头）。`);
+                    }
                     if (r2.status !== 400 || (!t2.toLowerCase().includes('unknown') && !t2.toLowerCase().includes('unsupported'))) {
                         if (traceId) {
                             const tm = traceMod || getTraceSync();
