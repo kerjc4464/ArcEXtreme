@@ -182,16 +182,19 @@ def _get_or_create_backend_session_id() -> str:
         return "arcextreme-backend"
 
 def _opencode_forward_headers(base_url: str, api_key: Optional[str], session_id: Optional[str] = None) -> Dict[str, str]:
-    """组装上游转发头：仅 opencode.ai 加 x-opencode-session + x-opencode-client。
+    """组装上游转发头：仅 OpenCode Go 端点（opencode.ai/zen/go/*）加头。
 
-    其他厂商（OpenAI 官端 / siliconflow / Ollama / 本地）原样不动，避免污染。
+    2026-09-06 起只有 Go 路由强制要求 x-opencode-session，其他端点
+    （OpenAI 官端 / siliconflow / Ollama / 本地 / 非 Go 的 opencode 路径）
+    原样不动，避免污染。
     session_id 优先用前端透传，否则用后端常驻兜底 ID（绝不每次随机）。
     """
     headers: Dict[str, str] = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
-        if base_url and "opencode.ai" in str(base_url):
+        u = str(base_url or "")
+        if "opencode.ai" in u and "/zen/go" in u:
             sid = (str(session_id).strip() if session_id else "") or _get_or_create_backend_session_id()
             headers["x-opencode-session"] = sid
             headers["x-opencode-client"] = "ArcEXtreme"
