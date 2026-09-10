@@ -46,7 +46,7 @@ async function callSubAgentBatch(settings, batchItems, soulsContentMap, contextT
         return `#${idx} ${tplRendered.slice(0,600).replace(/\n/g,' | ')}`;
     }).join('\n');
 
-    const soulBlocks = soulsInBatch.map(k=> `=== ${k} ===\n${String(soulsContentMap[k]||'').slice(0, s.shortPool?.subAgentMode==='perEvent'? 4000 : 1200)}`).join('\n\n');
+    const soulBlocks = soulsInBatch.map(k=> `=== ${k} ===\n${String(soulsContentMap[k]||'').slice(0, settings.shortPool?.subAgentMode==='perEvent'? 4000 : 1200)}`).join('\n\n');
     const user = `最近对话:\n${contextText||''}\n\n当前用户消息:\n${batchItems[0]?.userMessage||''}\n\n待裁判事件列表(${batchItems.length}):\n${eventsDesc}\n\n--- 模板渲染(每事件) ---\n${renderedPerEvent}\n\nSoul设定:\n${soulBlocks}`;
 
     const raw = await chatCompletion(cfg, [
