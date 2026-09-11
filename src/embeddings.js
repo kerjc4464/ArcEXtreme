@@ -32,6 +32,9 @@ async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 30) {
     const { _source, _session_id, ...cleanPayload } = payload || {};
     const source = _source || 'openai';
     const session_id = _session_id || getOpencodeSessionId();
+    const ctrl = new AbortController();
+    const abortMs = (Number(timeout) || 30) * 1000 + 10000;
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, abortMs);
     try {
         const proxyRes = await fetch(`${backendBase}/api/embedding_proxy`, {
             method: 'POST',
@@ -44,6 +47,7 @@ async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 30) {
                 timeout,
                 session_id,
             }),
+            signal: ctrl.signal,
         });
         if (proxyRes.status === 404) {
             const txt = await proxyRes.clone().text().catch(()=>'');
@@ -51,6 +55,9 @@ async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 30) {
         }
         return proxyRes;
     } catch (e) {
+        if (e && (e.name === 'AbortError' || String(e.message || '').includes('aborted'))) {
+            throw new Error(`Embedding代理请求超时(${Math.round(abortMs/1000)}s): ${backendBase}/api/embedding_proxy，请检查后端是否运行`);
+        }
         if (String(e.message).startsWith('PROXY_NOT_FOUND')) {
             const base = e.message.split(':')[1] || getBackendBase();
             throw new Error(`后端未更新：${base} 无 /api/embedding_proxy，请重启后端。已拦截直连。`);
@@ -59,6 +66,8 @@ async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 30) {
             throw new Error(`后端代理不可达：${backendBase}/api/embedding_proxy 无法连接（backendUrl=${backendBase}）。请检查后端运行且局域网改用 ${window.location.hostname}:9001。原错: ${e.message}`);
         }
         throw e;
+    } finally {
+        clearTimeout(timer);
     }
 }
 

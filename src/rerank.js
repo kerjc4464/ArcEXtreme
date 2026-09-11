@@ -62,22 +62,34 @@ export async function rerank(cfg, query, documents) {
         } catch { session_id = 'arcextreme-backend'; }
     }
     const tryProxy = async () => {
-        const proxyRes = await fetch(`${backendBase}/api/rerank_proxy`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: cfg.apiUrl, api_key: cfg.apiKey || '', payload: body, session_id }),
-        });
-        if (proxyRes.status === 404) {
-            const txt = await proxyRes.clone().text().catch(()=> '');
-            if (txt.includes('Not Found')) throw new Error('PROXY_NOT_FOUND');
+        // 后端写死 40s 超时，前端 50s Abort 兜底，防止假死时无限挂起
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, 50000);
+        try {
+            const proxyRes = await fetch(`${backendBase}/api/rerank_proxy`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: cfg.apiUrl, api_key: cfg.apiKey || '', payload: body, session_id }),
+                signal: ctrl.signal,
+            });
+            if (proxyRes.status === 404) {
+                const txt = await proxyRes.clone().text().catch(()=> '');
+                if (txt.includes('Not Found')) throw new Error('PROXY_NOT_FOUND');
+            }
+            return proxyRes;
+        } finally {
+            clearTimeout(timer);
         }
-        return proxyRes;
     };
 
     let r;
     try {
         r = await tryProxy();
     } catch (e) {
+        if (e && (e.name === 'AbortError' || String(e.message || '').includes('aborted'))) {
+            try { traceMod && tid && traceMod.finishTraceFail(tid, 'Rerank代理请求超时(50s)'); } catch {}
+            throw new Error('Rerank代理请求超时(50s)，已跳过精排直接用原序');
+        }
         if (String(e.message).startsWith('PROXY_NOT_FOUND')) {
             const base = e.message.split(':')[1] || getBackendBase();
             try { traceMod && tid && traceMod.finishTraceFail(tid, `后端未更新：${base} 无 /api/rerank_proxy`); } catch {}
