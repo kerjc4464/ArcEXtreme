@@ -83,6 +83,9 @@ export function injectMemory(settings, recentBlock, retrievedBlock, shortPoolBlo
     const text = parts.join('\n\n');
     setExtensionPrompt(TAG, text, pos(settings), settings.inject.depth, settings.inject.include_wi, role(settings));
 }
+// 本会话已注入过的升华独立TAG（用于无后端IO的同步全清）
+const knownSubTags = new Set();
+
 // 独立TAG注入升华（每soul一TAG，防覆盖）
 export function injectSublimated(settings, items){
     const inj = settings.sublimation?.inject || settings.inject;
@@ -97,17 +100,29 @@ export function injectSublimated(settings, items){
         const tag = TAG_SUB_PREFIX + soul;
         const block = buildSublimatedBlock(list);
         setExtensionPrompt(tag, block, posSub(settings), inj.depth, inj.include_wi, roleSub(settings));
+        knownSubTags.add(tag);
     }
+}
+// 同步清除本会话所有已知升华TAG（quiet/冷却/非法chat等路径用，无后端IO）
+export function clearAllKnownSublimated(settings){
+    if (!knownSubTags.size) return;
+    const inj = settings.sublimation?.inject || settings.inject;
+    for(const tag of knownSubTags){
+        try { setExtensionPrompt(tag, '', posSub(settings), inj.depth, inj.include_wi, roleSub(settings)); } catch {}
+    }
+    knownSubTags.clear();
 }
 export function clearSublimated(settings, souls){
     const inj = settings.sublimation?.inject || settings.inject;
     if (souls && souls.length){
         for(const s of souls){
-            setExtensionPrompt(TAG_SUB_PREFIX+s, '', posSub(settings), inj.depth, inj.include_wi, roleSub(settings));
+            const tag = TAG_SUB_PREFIX+s;
+            try { setExtensionPrompt(tag, '', posSub(settings), inj.depth, inj.include_wi, roleSub(settings)); } catch {}
+            knownSubTags.delete(tag);
         }
     } else {
-        // 清所有：遍历已知 souls 通过后端获取？保守清5个占位
-        // 调用方应传入 souls 列表
+        // 调用方未传 souls 列表时回落到本会话已知TAG全清，避免旧独立TAG永久残留
+        clearAllKnownSublimated(settings);
     }
 }
 export function clearAllSublimatedForChat(settings, allSouls){
