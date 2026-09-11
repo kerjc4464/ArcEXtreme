@@ -25,8 +25,8 @@ import {
     buildRecentBlock,
     buildRetrievedBlock,
     buildShortPoolBlock,
-    buildSublimatedBlock,
     injectSublimated,
+    clearAllKnownSublimated,
     clearAllSublimatedForChat,
 } from './src/inject.js';
 import { log, renderSoulsList, renderEventsList, setStatus, initTraceUI, pushToast } from './src/ui.js';
@@ -38,6 +38,7 @@ const toastr = window.toastr;
 const S = () => extension_settings[SETTINGS_KEY];
 
 let lastQueryTs = 0;
+let lastQueryChatId = '';
 const QUERY_COOLDOWN = 2000;
 
 // ---- 生成拦截防阻塞：快慢分离 ----
@@ -49,9 +50,21 @@ const EMBED_MS = 15000;
 const QUERY_MS = 12000;
 const RERANK_MS = 15000;
 const MAX_FAST_PATH_MS = 30000;
-let bgPoolRunning = false;
-let bgA1Running = false;
-let bgSubRunning = false;
+// 后台任务按 chat 隔离，防止切聊后互相饿死；TTL 自清防止 LLM hang 死后永久占位
+const BG_FLAG_TTL_MS = 5 * 60 * 1000;
+const bgRunning = new Map(); // key: `${chatId}::${kind}` -> startTs
+function bgTake(chatId, kind) {
+    const key = `${chatId}::${kind}`;
+    const ts = bgRunning.get(key);
+    if (ts && (Date.now() - ts) < BG_FLAG_TTL_MS) return false;
+    bgRunning.set(key, Date.now());
+    return true;
+}
+function bgRelease(chatId, kind) { try { bgRunning.delete(`${chatId}::${kind}`); } catch {} }
+function bgBusy(chatId, kind) {
+    const ts = bgRunning.get(`${chatId}::${kind}`);
+    return !!ts && (Date.now() - ts) < BG_FLAG_TTL_MS;
+}
 
 function withTimeout(promise, ms, label) {
     let timer = null;
@@ -281,7 +294,8 @@ async function processUserInput(text, chatId, contextText = '') {
     const soulsContentsMapForExtract = {};
     let fetchedCount=0, failedCount=0;
     try{
-        const _rets = await Promise.all(souls.map(so=> backend.getSoul(so.filename).then(txt=>({so, txt, ok:true})).catch(e=>({so, err:e.message, ok:false}))));
+        // 逐项限时：单个soul失败不拖累整批
+        const _rets = await Promise.all(souls.map(so=> withTimeout(backend.getSoul(so.filename), FAST_BACKEND_MS, `Soul原文:${so.name}`).then(txt=>({so, txt, ok:true})).catch(e=>({so, err:e.message, ok:false}))));
         for(const r of _rets){ if(r.ok){ soulsContentsMapForExtract[r.so.name]=r.txt; fetchedCount++; if(s.debug) log(`[extract] soul原文已读 ${r.so.name} ${r.txt.length}字`);} else { failedCount++; log(`[extract] soul原文读取失败 ${r.so.name}: ${r.err}`);} }
         if(s.debug) log(`[extract] souls原文拉取完成 成功${fetchedCount} 失败${failedCount} / ${souls.length}`);
         if(!fetchedCount && souls.length) { notify('事件提炼', false, 'soul原文全部读取失败，2bit初值将无依据'); }
@@ -290,7 +304,9 @@ async function processUserInput(text, chatId, contextText = '') {
     setPipeline('extract');
     let extracted;
     try {
-        extracted = await extractEvents(s, text, soulNames, contextText, soulsContentsMapForExtract);
+        // 写入链路同样限时：超时则本轮跳过提炼，不卡 pipeline
+        const extractMs = (Number(s.extractLLM?.timeout) || 40) * 1000;
+        extracted = await withTimeout(extractEvents(s, text, soulNames, contextText, soulsContentsMapForExtract), extractMs, '事件提炼');
         const evts = extracted.events || [];
         if (!evts.length || !evts[0].event) {
             notify('事件提炼', false, '未提炼出有效事件');
@@ -303,7 +319,7 @@ async function processUserInput(text, chatId, contextText = '') {
         const texts = evts.map(e=>e.event);
         let vecs;
         try {
-            vecs = await embedTexts(s.embedding, texts);
+            vecs = await withTimeout(embedTexts(s.embedding, texts), EMBED_MS, '向量化');
         } catch (e) {
             notify('向量化', false, e.message);
             setPipeline(null);
@@ -321,7 +337,7 @@ async function processUserInput(text, chatId, contextText = '') {
         }));
         try {
             const capForInsert = Number(s.shortPool?.perSoulCap || 15);
-            const res = await backend.insertBatch(chatId, batchPayload, capForInsert);
+            const res = await withTimeout(backend.insertBatch(chatId, batchPayload, capForInsert), FAST_BACKEND_MS, '事件入库');
             const okCount = (res.results||[]).filter(r=>!r.error).length;
             notify('事件入库', true, `${okCount}/${evts.length} 已入短期池`);
             log(`已记录 ${okCount} 事件: ${evts.map(e=>`【${e.soul}】${e.event.slice(0,30)}(${e.counter})`).join(' | ')}`);
@@ -353,13 +369,24 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         if (s.debug) log('主开关已关闭，跳过生成拦截');
         return;
     }
-    if (type === 'quiet') return;
-
-    const now = Date.now();
-    if (now - lastQueryTs < QUERY_COOLDOWN) {
-        if (s.debug) log('生成拦截：冷却中，跳过');
+    // quiet 生成（总结/重排等）不应携带记忆：同步清主TAG与本会话已知升华TAG
+    if (type === 'quiet') {
+        try { clearInjection(s); } catch {}
+        try { clearAllKnownSublimated(s); } catch {}
         return;
     }
+
+    const now = Date.now();
+    // 冷却内同chat沿用上轮注入（上下文几乎不变）；已切chat则正常执行，防止旧记忆串味
+    const cdChatId = (() => { try { return getContext()?.chatId || getCurrentChatId(); } catch { return ''; } })();
+    if (now - lastQueryTs < QUERY_COOLDOWN) {
+        if (cdChatId && cdChatId === lastQueryChatId) {
+            if (s.debug) log('生成拦截：冷却中，沿用上轮注入');
+            return;
+        }
+        if (s.debug) log('生成拦截：冷却中但已切chat，正常执行防串味');
+    }
+    lastQueryChatId = cdChatId;
     lastQueryTs = now;
 
     try {
@@ -368,6 +395,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         if (!isValidChatId(chatId)) {
             if (s.debug) log(`生成拦截：chatId 无效(${chatId})，跳过`);
             try{ clearInjection(s); }catch{}
+            try{ clearAllKnownSublimated(s); }catch{}
             return;
         }
         const source = chat && chat.length ? chat : ctx.chat || [];
@@ -375,6 +403,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         const userText = lastUser ? lastUser.mes : '';
         if (!userText) {
             clearInjection(s);
+            try{ clearAllKnownSublimated(s); }catch{}
             return;
         }
         const contextTextExtract = buildContextText(source, s.contextWindow || 5);
@@ -422,6 +451,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
 
         // ---- 统一 Soul 并行拉取：池内 souls + Route前12 去重后一次 Promise.all（快路径，超时降级为空） ----
         let unifiedSoulMap = {};
+        let soulMapUsable = true;
         {
             const soulsAll = enabledSoulsForStage.length ? enabledSoulsForStage : await withTimeout(backend.listSouls(), FAST_BACKEND_MS, 'Soul列表').catch(()=>[]);
             const poolSoulSet = new Set(shortPoolItems.map(it=> it.pool_soul || it.state_soul || it.soul).filter(Boolean));
@@ -433,13 +463,23 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             for (const so of routeCandidates) if (!unionMap.has(so.name)) unionMap.set(so.name, so);
             const unionList = [...unionMap.values()];
             if (unionList.length && !fastExpired()) {
-                const results = await withTimeout(Promise.all(unionList.map(so => backend.getSoul(so.filename).then(txt=>({so, txt, ok:true})).catch(e=>({so, err:e.message, ok:false})))), FAST_BACKEND_MS, 'Soul原文拉取').catch(()=>[]);
+                // 逐项限时 + 全量结算：单个soul失败/超时不拖累整批，保留部分成功
+                const results = await Promise.all(unionList.map(so =>
+                    withTimeout(backend.getSoul(so.filename), FAST_BACKEND_MS, `Soul原文:${so.name}`)
+                        .then(txt=>({so, txt, ok:true}))
+                        .catch(e=>({so, err:e.message, ok:false}))
+                ));
                 let fetched=0, failed=0;
                 for (const r of results) {
                     if (r.ok) { unifiedSoulMap[r.so.name]=r.txt; fetched++; if(s.debug) log(`[Soul并行] 已读 ${r.so.name} ${r.txt.length}字`);} else { failed++; log(`[Soul并行] 读取失败 ${r.so.name}: ${r.err}`);}
                 }
                 if(s.debug) log(`[Soul并行] 完成 成功${fetched} 失败${failed} / 需${unionList.length} 池内${poolSoulSet.size}`);
                 if(!fetched && unionList.length) notify('Soul读取', false, 'soul原文全部读取失败');
+            }
+            // soul原文可用性：需要soul但全部拉取失败时，本轮跳过裁判/路由（无依据不乱判），下轮重试
+            if (!Object.keys(unifiedSoulMap).length && unionList.length) {
+                soulMapUsable = false;
+                log('[Soul并行] 原文全失败：本轮跳过SubAgent裁判与路由，下轮重试');
             }
         }
 
@@ -453,9 +493,10 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         const skipThr = Number(s.shortPool?.skipThreshold||3);
         const routeCfgLocal = s.routeLLM.useExtract ? s.extractLLM : s.routeLLM;
 
-        // 后台：短期池SubAgent裁判（快照隔离 + 防重入，不阻塞聊天）
-        if (shortPoolItems.length && !bgPoolRunning && !fastExpired()) {
-            bgPoolRunning = true;
+        // 后台：短期池SubAgent裁判（快照隔离 + 按chat防重入，不阻塞聊天）
+        if (shortPoolItems.length && !soulMapUsable) {
+            log('[SubAgent后台]跳过：soul原文全失败，无依据不判，下轮重试');
+        } else if (shortPoolItems.length && !fastExpired() && bgTake(chatId, 'pool')) {
             const poolSnap = shortPoolItems.map(it=> ({
                 event_id: it.id,
                 soul: it.pool_soul || it.state_soul || it.soul,
@@ -475,17 +516,23 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 launchBackground((async () => {
                     const evaluations = await evaluateShortPool(s, poolSnap, soulMapSnap, ctxSnap, userSnap);
                     if (evaluations.length) {
-                        const syncRes = await withTimeout(backend.syncShortPool(chatSnap, evaluations), FAST_BACKEND_MS, '短期池同步');
+                        let syncRes = null;
+                        try {
+                            syncRes = await withTimeout(backend.syncShortPool(chatSnap, evaluations), FAST_BACKEND_MS, '短期池同步');
+                        } catch (e) {
+                            log(`[SubAgent后台]同步失败，本轮裁判丢弃，下轮重判: ${e.message}`);
+                            return;
+                        }
                         const cnt = syncRes.count || 0;
                         log(`[SubAgent后台]完成: ${evaluations.map(e=>`${e.soul}#${e.event_id}:${e.action}`).join(' | ')}`);
                         notify('SubAgent裁判', true, `${cnt} 已更新(后台)`);
                         if (s.debug) { try { refreshShortPool(); if(isDataModalOpen()){ refreshModalShortPool(); } } catch {} }
                     }
-                })(), '[SubAgent后台]', () => { bgPoolRunning = false; });
+                })(), '[SubAgent后台]', () => { bgRelease(chatSnap, 'pool'); });
             } else {
-                bgPoolRunning = false;
+                bgRelease(chatId, 'pool');
             }
-        } else if (shortPoolItems.length && bgPoolRunning) {
+        } else if (shortPoolItems.length && bgBusy(chatId, 'pool')) {
             log('SubAgent后台裁判进行中，本轮跳过（防堆积）');
         } else if (!shortPoolItems.length) {
             log('短期池为空，跳过SubAgent');
@@ -521,18 +568,21 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         const routeChain = (async ()=>{
             if (!routeCfgLocal.apiUrl) { log('路由 LLM 未配置，跳过分桶选择'); return {buckets:[], souls:[]}; }
             if (fastExpired()) { log('快路径超时，跳过路由'); return {buckets:[], souls:[]}; }
+            if (!soulMapUsable) { log('路由跳过：soul原文全失败，无依据不分桶'); return {buckets:[], souls:[]}; }
             setPipeline('route');
             notify('路由决策', null, `模型 ${routeCfgLocal.model||'—'} 开始调用`);
             try {
                 const souls = enabledSoulsForStage.length ? enabledSoulsForStage : await withTimeout(backend.listSouls(), FAST_BACKEND_MS, 'Soul列表').catch(()=>[]);
                 const soulsContents = [];
                 for (const so of souls.slice(0, 12)) {
+                    if (fastExpired()) break;
                     const c = unifiedSoulMap[so.name];
                     if (c) soulsContents.push({ name: so.name, content: c });
                     else {
                         try { const txt = await withTimeout(backend.getSoul(so.filename), FAST_BACKEND_MS, 'Soul原文'); soulsContents.push({name:so.name, content:txt}); unifiedSoulMap[so.name]=txt; } catch {}
                     }
                 }
+                if (!soulsContents.length && souls.length) { log('路由跳过：无可用soul设定'); return {buckets:[], souls:[]}; }
                 const route = await withTimeout(routeQuery(s, userText, soulsContents, contextTextRoute), ROUTE_LLM_MS, '路由决策');
                 let b = route.buckets;
                 let ss = route.souls;
@@ -624,8 +674,9 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 // A1 二次裁判：只改分不阻塞本次注入，丢后台追赶（快照隔离 + 防重入）
                 const raCfg = s.shortPool?.retrievedSubAgent;
                 const raEnabled = raCfg ? raCfg.enabled !== false : true;
-                if (raEnabled && retrieved.length && !bgA1Running) {
-                    bgA1Running = true;
+                if (raEnabled && retrieved.length && !soulMapUsable) {
+                    log('[SubAgent检索后台]跳过：soul原文全失败，无依据不判，下轮重试');
+                } else if (raEnabled && retrieved.length && bgTake(chatId, 'a1')) {
                     const retrievedSnap = retrieved.slice();
                     const fillerSnap = fillerEvents.slice();
                     const tradSnap = traditionalRetrieved.slice();
@@ -707,24 +758,30 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                             try {
                                 const allSouls = await withTimeout(backend.listSouls(), FAST_BACKEND_MS, 'Soul列表').catch(()=>[]);
                                 const toFetch = allSouls.filter(x=> missing.includes(x.name));
-                                const res = await withTimeout(Promise.all(toFetch.map(so=> backend.getSoul(so.filename).then(txt=>({name:so.name, txt})).catch(()=>null))), FAST_BACKEND_MS, 'Soul原文').catch(()=>[]);
+                                const res = await Promise.all(toFetch.map(so=> withTimeout(backend.getSoul(so.filename), FAST_BACKEND_MS, `Soul原文:${so.name}`).then(txt=>({name:so.name, txt})).catch(()=>null)));
                                 for (const r of res) if (r) { localSoulMap[r.name]=r.txt; }
                             } catch {}
                         }
                         for (const n of needSouls) if (soulMapSnapA1[n]) localSoulMap[n]=soulMapSnapA1[n];
-                        if (!Object.keys(localSoulMap).length) localSoulMap = soulMapSnapA1;
+                        if (!Object.keys(localSoulMap).length) { log('[SubAgent检索后台]跳过：无可用soul原文，下轮重试'); return; }
                         const eval2 = await evaluateShortPool(s, evalItems, localSoulMap, ctxSnapA1, userSnapA1);
                         if (eval2.length) {
                             const hasReal = eval2.some(e=> e.action !== 'Skip');
-                            const syncRes2 = await withTimeout(backend.syncShortPool(chatSnapA1, eval2), FAST_BACKEND_MS, '短期池同步');
+                            let syncRes2 = null;
+                            try {
+                                syncRes2 = await withTimeout(backend.syncShortPool(chatSnapA1, eval2), FAST_BACKEND_MS, '短期池同步');
+                            } catch (e) {
+                                log(`[SubAgent检索后台]同步失败，本轮裁判丢弃，下轮重判: ${e.message}`);
+                                return;
+                            }
                             const cnt2 = syncRes2.count ?? eval2.length;
                             if (hasReal) log(`[SubAgent检索后台]完成: ${eval2.map(e=>`${e.soul}#${e.event_id}:${e.action}${e.why?`(${e.why.slice(0,30)})`:''}`).join(' | ')}`);
                             else log(`[SubAgent检索后台]完成: 全部Skip ${evalItems.length}条`);
                             notify('SubAgent裁判(检索)', true, `${cnt2} 已更新(后台)${hasReal?'':'(全Skip)'}`);
                             if (s.debug) { try { refreshShortPool(); if(isDataModalOpen()){ refreshModalShortPool(); } } catch {} }
                         }
-                    })(), '[SubAgent检索后台]', () => { bgA1Running = false; });
-                } else if (raEnabled && retrieved.length && bgA1Running) {
+                    })(), '[SubAgent检索后台]', () => { bgRelease(chatSnapA1, 'a1'); });
+                } else if (raEnabled && retrieved.length && bgBusy(chatId, 'a1')) {
                     log('A1后台裁判进行中，本轮跳过（防堆积）');
                 }
             } catch (e) {
@@ -767,8 +824,9 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 }
             }
         } catch {}
-        if (!bgSubRunning && !fastExpired()) {
-            bgSubRunning = true;
+        if (s.sublimation?.enabled === false) {
+            if (s.debug) log('升华已关闭，跳过后台检测');
+        } else if (!fastExpired() && bgTake(chatId, 'sub')) {
             const chatSnapSub = chatId, ctxSnapSub = contextTextSubAgent || contextText;
             const soulMapSnapSub = { ...unifiedSoulMap };
             const enabledSnapSub = new Set(enabledSetForStage);
@@ -790,36 +848,44 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 const soulsToFetchForSub = candSoulSet.size ? soulsSub.filter(so=> candSoulSet.has(so.name)) : [];
                 const soulsContentMap = {};
                 if (soulsToFetchForSub.length) {
-                    const subResArr = await withTimeout(Promise.all(soulsToFetchForSub.map(so=> backend.getSoul(so.filename).then(txt=>({so, txt, ok:true})).catch(e=>({so, err:e.message, ok:false})))), FAST_BACKEND_MS, '升华Soul拉取').catch(()=>[]);
+                    const subResArr = await Promise.all(soulsToFetchForSub.map(so=> withTimeout(backend.getSoul(so.filename), FAST_BACKEND_MS, `升华Soul:${so.name}`).then(txt=>({so, txt, ok:true})).catch(e=>({so, err:e.message, ok:false}))));
                     for (const r of (subResArr || [])) {
                         if (r && r.ok) soulsContentMap[r.so.name] = r.txt;
                     }
                 }
                 const mapForSub = Object.keys(soulsContentMap).length ? soulsContentMap : soulMapSnapSub;
+                if (!Object.keys(mapForSub).length) { log('[升华后台]跳过：无可用soul原文，不做无依据升华'); return; }
                 const subRes = await checkAndSublimate(s, chatSnapSub, ctxSnapSub, mapForSub);
                 if (subRes && subRes.length) {
                     log(`[升华后台]完成 ${subRes.length} 条: ${subRes.map(x=>`【${x.soul}】${x.sublimated.slice(0,30)}`).join(' | ')}`);
                     notify('升华', true, `${subRes.length} 条已固化到soul(后台)`);
-                    try {
-                        injectSublimated(s, subRes);
-                        if (s.debug) refreshSouls();
-                    } catch (e) { log(`[升华后台]注入失败: ${e.message}`); }
+                    // 跨chat guard：已切聊只写库不注入，防止A聊固化污染B聊prompt
+                    let curChat = '';
+                    try { curChat = getContext()?.chatId || getCurrentChatId(); } catch {}
+                    if (curChat && curChat !== chatSnapSub) {
+                        log(`[升华后台]已切chat(${String(chatSnapSub).slice(0,8)}→${String(curChat).slice(0,8)})：只写库不注入`);
+                    } else {
+                        try {
+                            injectSublimated(s, subRes);
+                            if (s.debug) refreshSouls();
+                        } catch (e) { log(`[升华后台]注入失败: ${e.message}`); }
+                    }
                     if (s.debug) { try { refreshSublimated(); if(isDataModalOpen()){ refreshModalSublimated(); } } catch {} }
                 }
-            })(), '[升华后台]', () => { bgSubRunning = false; });
-        } else if (bgSubRunning) {
+            })(), '[升华后台]', () => { bgRelease(chatSnapSub, 'sub'); });
+        } else if (bgBusy(chatId, 'sub')) {
             log('升华后台进行中，本轮跳过（防堆积）');
         }
 
         // Stage H：注入（快路径同步放行，慢任务已在后台追赶）
+        // 升华只走独立TAG（injectSublimated），主TAG不再重复内联，避免同一批出现两遍
         setPipeline('inject');
         const recentBlock = buildRecentBlock(recent, s.recentDays);
         const retrievedBlock = buildRetrievedBlock(rerankedTraditional);
         const shortPoolBlock = buildShortPoolBlock(shortPoolGrouped, cap);
-        const sublimatedBlock = buildSublimatedBlock(sublimatedItems);
-        injectMemory(s, recentBlock, retrievedBlock, shortPoolBlock, sublimatedBlock);
+        injectMemory(s, recentBlock, retrievedBlock, shortPoolBlock, '');
         const fastMs = Date.now() - fastT0;
-        const bgNote = (bgPoolRunning || bgA1Running || bgSubRunning) ? ' · 裁判/升华后台追赶中' : '';
+        const bgNote = (bgBusy(chatId, 'pool') || bgBusy(chatId, 'a1') || bgBusy(chatId, 'sub')) ? ' · 裁判/升华后台追赶中' : '';
         notify('记忆注入', true, `短期池${Object.keys(shortPoolGrouped).length}魂 ${shortPoolItems.length}条 · 检索${rerankedTraditional.length} · 升华${sublimatedItems.length} · 分桶[${buckets.join(',')||'无'}] · ${fastMs}ms${bgNote}`);
         log(`注入完成(${fastMs}ms)：短期池${shortPoolItems.length}条，检索${rerankedTraditional.length}条，升华${sublimatedItems.length}条，分桶[${buckets.join(',') || '无'}]${bgNote}`);
         clearPipelineDelayed();
