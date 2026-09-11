@@ -32,14 +32,32 @@ function baseUrl() {
 // 供 UI 显示实际生效地址
 export function getEffectiveBackendUrl() { return baseUrl(); }
 
+// 本地后端均为轻量 IO，默认 12s 超时兜底，防止 fetch 无限挂起阻塞生成拦截
+const BACKEND_TIMEOUT_MS = 12000;
+
+async function fetchWithTimeout(url, opts = {}, ms = BACKEND_TIMEOUT_MS) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, ms);
+    try {
+        return await fetch(url, { ...opts, signal: ctrl.signal });
+    } catch (e) {
+        if (e && (e.name === 'AbortError' || String(e.message || '').includes('aborted'))) {
+            throw new Error(`后端请求超时(${ms}ms): ${url}`);
+        }
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function apiGet(path) {
-    const res = await fetch(`${baseUrl()}${path}`, { method: 'GET' });
+    const res = await fetchWithTimeout(`${baseUrl()}${path}`, { method: 'GET' });
     if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
     return res.json();
 }
 
 async function apiPost(path, body) {
-    const res = await fetch(`${baseUrl()}${path}`, {
+    const res = await fetchWithTimeout(`${baseUrl()}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -49,7 +67,7 @@ async function apiPost(path, body) {
 }
 
 async function apiDelete(path) {
-    const res = await fetch(`${baseUrl()}${path}`, { method: 'DELETE' });
+    const res = await fetchWithTimeout(`${baseUrl()}${path}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`DELETE ${path} -> ${res.status}`);
     return res.json();
 }
@@ -64,7 +82,7 @@ export const backend = {
     listSoulsFull: () => apiGet('/api/souls'),
     getSoulsEnabled: () => apiGet('/api/souls/enabled').then(d=>d.enabled||{}),
     setSoulsEnabled: (enabledMap) => apiPost('/api/souls/enabled', {enabled: enabledMap}),
-    getSoul: (filename) => fetch(`${baseUrl()}/api/souls/${encodeURIComponent(filename)}`).then(r => {
+    getSoul: (filename) => fetchWithTimeout(`${baseUrl()}/api/souls/${encodeURIComponent(filename)}`).then(r => {
         if (!r.ok) throw new Error(`soul ${filename} -> ${r.status}`);
         return r.text();
     }),

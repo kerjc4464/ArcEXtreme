@@ -138,10 +138,14 @@ function buildBody(cfg, messages, opts) {
 }
 
 // 核心：狠狠走后端代理，彻底规避 CORS（不再回退直连）
+// 前端 fetch 自带 Abort 超时（cfg.timeout + 10s 缓冲），防止代理hang住时无限阻塞生成拦截
 async function doFetch(bodyObj, cfg, directUrl, directHeaders, sessionId) {
     const backendBase = getBackendBase();
     const proxyUrl = `${backendBase}/api/llm_proxy`;
     const timeout = Number(cfg.timeout ?? 40) || 40;
+    const ctrl = new AbortController();
+    const abortMs = (timeout + 10) * 1000;
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, abortMs);
     try {
         const proxyRes = await fetch(proxyUrl, {
             method: 'POST',
@@ -154,6 +158,7 @@ async function doFetch(bodyObj, cfg, directUrl, directHeaders, sessionId) {
                 verify_ssl: false,
                 session_id: sessionId || undefined,
             }),
+            signal: ctrl.signal,
         });
         if (proxyRes.status === 404) {
             const txt = await proxyRes.clone().text().catch(() => '');
@@ -163,6 +168,9 @@ async function doFetch(bodyObj, cfg, directUrl, directHeaders, sessionId) {
         }
         return proxyRes;
     } catch (e) {
+        if (e && (e.name === 'AbortError' || String(e.message || '').includes('aborted'))) {
+            throw new Error(`LLM代理请求超时(${timeout}s+缓冲): ${proxyUrl}，模型 ${cfg.model||'—'}。请检查模型速度或调小超时/关闭A1二次裁判`);
+        }
         if (String(e.message).startsWith('PROXY_NOT_FOUND')) {
             const base = e.message.split(':')[1] || backendBase;
             throw new Error(`后端未更新：${base} 无 /api/llm_proxy，请重启后端到最新版（git pull 后重启 Start.bat）。已拦截直连以避免 CORS`);
@@ -171,6 +179,8 @@ async function doFetch(bodyObj, cfg, directUrl, directHeaders, sessionId) {
             throw new Error(`后端代理不可达：${proxyUrl} 无法连接（backendUrl=${backendBase}，页面 ${window.location.hostname}）。请检查：1) 后端是否运行 2) 端口 9001 是否开放 3) 若局域网访问请将后端地址改成 ${window.location.hostname}:9001 而非 127.0.0.1。原错: ${e.message}`);
         }
         throw e;
+    } finally {
+        clearTimeout(timer);
     }
 }
 
