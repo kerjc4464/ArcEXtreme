@@ -22,7 +22,9 @@ ArcEXtreme 是一个为 SillyTavern 设计的长期人格维持扩展。在传�
 ## 快速开始
 
 1. 使用SillyTavern内置的插件安装器安装本插件
-2. 到 `ArcEXtreme-BackEnd` 一键启动后端（`start.bat` / `start.sh`，默认 `:9001`）
+2. 到 `ArcEXtreme-BackEnd` 一键启动后端（默认 `:9001`）：
+   * Windows：双击 `start.bat`
+   * macOS / Linux：先装好 Python 3.13（`brew install python@3.13 libomp`），再执行 `./start.sh`（改端口：`ARCEXTREME_PORT=9002 ./start.sh`）
 3. 刷新页面
 4. 在设置面板配置各 LLM、Embedding 与注入位置即可
 

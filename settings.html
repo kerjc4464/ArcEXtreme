@@ -348,6 +348,11 @@
                 <label for="arcextreme-rerank-key"><small>API Key</small></label>
                 <input type="password" id="arcextreme-rerank-key" class="text_pole" />
             </div>
+            <div class="flex-container flexFlowColumn marginTop5">
+                <label for="arcextreme-rerank-timeout"><small>超时 (秒)</small></label>
+                <input type="number" id="arcextreme-rerank-timeout" class="text_pole" min="5" max="300" step="1" placeholder="40" />
+                <small class="ax-hint">默认 40 秒，需 ≥ 后端转发超时，前端会自动 +10s/+2s 缓冲避免误杀</small>
+            </div>
         </div>
     </div>
 

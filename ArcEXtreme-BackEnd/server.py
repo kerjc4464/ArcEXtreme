@@ -532,6 +532,8 @@ class RerankProxy(BaseModel):
     url: str
     api_key: Optional[str] = None
     payload: dict
+    timeout: Optional[int] = 40
+    verify_ssl: Optional[bool] = False
     session_id: Optional[str] = None
 
 class LLMProxy(BaseModel):
@@ -1933,8 +1935,9 @@ async def rerank_proxy(payload: RerankProxy):
             logger.warning(f"[rerank_proxy] forwarding to private address: {url}")
     except: pass
     headers = _opencode_forward_headers(url, payload.api_key, payload.session_id)
+    timeout = payload.timeout or 40
     try:
-        async with httpx.AsyncClient(timeout=40, verify=False) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=payload.verify_ssl) as client:
             r = await client.post(url, json=payload.payload, headers=headers)
             try:
                 data = r.json()

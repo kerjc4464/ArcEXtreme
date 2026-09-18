@@ -26,6 +26,32 @@ function getBackendBase() {
     } catch { return 'http://127.0.0.1:9001'; }
 }
 
+function isMissingSessionError(text) {
+    const lower = String(text || '').toLowerCase();
+    return lower.includes('missingsessionid') || lower.includes('x-opencode-session');
+}
+
+function pickScore(x) {
+    if (x == null || typeof x !== 'object') return 0;
+    for (const k of ['relevance_score', 'relevanceScore', 'rerank_score', 'rerankScore', 'score', 'similarity', 'relevance', 'confidence']) {
+        const v = Number(x[k]);
+        if (Number.isFinite(v)) return v;
+    }
+    return 0;
+}
+
+function pickResults(d) {
+    if (!d || typeof d !== 'object') return [];
+    if (Array.isArray(d)) return d;
+    for (const k of ['results', 'data', 'ranked_results', 'rankedResults', 'reranked', 'items']) {
+        if (Array.isArray(d[k])) return d[k];
+    }
+    // OpenAI / Cohere / Jina 各家包装差异：{ output: [...] } / { response: {...} }
+    if (Array.isArray(d.output)) return d.output;
+    if (d.response && typeof d.response === 'object') return pickResults(d.response);
+    return [];
+}
+
 let _traceCache = null;
 async function getTrace() {
     if (_traceCache !== null) return _traceCache;
@@ -34,6 +60,7 @@ async function getTrace() {
 
 export async function rerank(cfg, query, documents) {
     if (!cfg || !cfg.enabled || !cfg.apiUrl) return null;
+    if (!Array.isArray(documents) || !documents.length) return [];
     let tid = null;
     let traceMod = null;
     try { traceMod = await getTrace(); tid = traceMod.beginTrace('rerank', 'Rerank 精排', cfg, { docCount: documents.length }); } catch {}
@@ -61,15 +88,16 @@ export async function rerank(cfg, query, documents) {
             session_id = localStorage.getItem(KEY) || 'arcextreme-backend';
         } catch { session_id = 'arcextreme-backend'; }
     }
+    // 超时三层对齐：后端 httpx(timeout) <= 前端 Abort(timeout+10s)。index.js 的 withTimeout 再包一层同样用 cfg.timeout。
+    const timeout = Math.max(5, Math.min(300, Number(cfg.timeout) || 40));
     const tryProxy = async () => {
-        // 后端写死 40s 超时，前端 50s Abort 兜底，防止假死时无限挂起
         const ctrl = new AbortController();
-        const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, 50000);
+        const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, (timeout + 10) * 1000);
         try {
             const proxyRes = await fetch(`${backendBase}/api/rerank_proxy`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: cfg.apiUrl, api_key: cfg.apiKey || '', payload: body, session_id }),
+                body: JSON.stringify({ url: cfg.apiUrl, api_key: cfg.apiKey || '', payload: body, timeout, verify_ssl: false, session_id }),
                 signal: ctrl.signal,
             });
             if (proxyRes.status === 404) {
@@ -87,8 +115,8 @@ export async function rerank(cfg, query, documents) {
         r = await tryProxy();
     } catch (e) {
         if (e && (e.name === 'AbortError' || String(e.message || '').includes('aborted'))) {
-            try { traceMod && tid && traceMod.finishTraceFail(tid, 'Rerank代理请求超时(50s)'); } catch {}
-            throw new Error('Rerank代理请求超时(50s)，已跳过精排直接用原序');
+            try { traceMod && tid && traceMod.finishTraceFail(tid, `Rerank代理请求超时(${timeout}s+缓冲)`); } catch {}
+            throw new Error(`Rerank代理请求超时(${timeout}s+缓冲)，已跳过精排直接用原序`);
         }
         if (String(e.message).startsWith('PROXY_NOT_FOUND')) {
             const base = e.message.split(':')[1] || getBackendBase();
@@ -103,20 +131,31 @@ export async function rerank(cfg, query, documents) {
         throw e;
     }
 
-    try {
-        if (!r.ok) {
-            const txt = await r.text().catch(() => '');
-            try { traceMod && tid && traceMod.finishTraceFail(tid, `HTTP ${r.status}: ${txt.slice(0, 400)}`, txt); } catch {}
-            return null;
+    // 非 200 不再吞成 null：透出真实状态码+云端原文，否则 400 参数错永远查不到
+    if (!r.ok) {
+        const txt = await r.text().catch(() => '');
+        try { traceMod && tid && traceMod.finishTraceFail(tid, `HTTP ${r.status}: ${txt.slice(0, 800)}`, txt); } catch {}
+        if (r.status === 400 && isMissingSessionError(txt)) {
+            throw new Error(`Rerank 400 MissingSessionID（缺 x-opencode-session）：${txt.slice(0, 300)}。请更新后端到最新版（需转发该请求头）`);
         }
+        throw new Error(`Rerank ${r.status}: ${txt.slice(0, 300) || '无返回体'}（已透出云端原文，非欠费问题请按此排查）`);
+    }
+    try {
         const d = await r.json();
         try { traceMod && tid && traceMod.finishTraceOk(tid, JSON.stringify(d, null, 2).slice(0, 8000), d); } catch {}
-        const results = d.results || d.data || [];
+        const results = pickResults(d);
+        if (!results.length) {
+            try { traceMod && tid && traceMod.finishTraceFail(tid, `云端返回 200 但无可用排序数组，keys=[${Object.keys(d || {}).join(',')}]`); } catch {}
+            throw new Error(`Rerank 返回为空：云端 200 但无 results/data 数组（keys=[${Object.keys(d || {}).join(',') || '空'}]），已用原序放行`);
+        }
         return results
-            .map((x) => ({ index: x.index, score: x.relevance_score ?? x.score ?? 0 }))
+            .map((x, i) => ({ index: Number.isInteger(x?.index) ? x.index : i, score: pickScore(x) }))
+            .filter(x => Number.isInteger(x.index) && x.index >= 0 && x.index < documents.length)
             .sort((a, b) => b.score - a.score);
     } catch (e) {
+        // 上面主动 throw 的业务错直接透出，不二次包装
+        if (e && /Rerank (400|404|422|429|500|502|503)|Rerank 返回为空|MissingSessionID/.test(String(e.message || ''))) throw e;
         try { traceMod && tid && traceMod.finishTraceFail(tid, e.message || String(e)); } catch {}
-        return null;
+        throw new Error(`Rerank 解析失败：${e.message || String(e)}（已用原序放行，请看 Trace 原始返回）`);
     }
 }

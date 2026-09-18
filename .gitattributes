@@ -1,0 +1,6 @@
+# 换行符锁定：sh 在 Mac/Linux 必须 LF，bat 在 Windows 保持 CRLF，互不影响
+.gitattributes text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+*.bat text eol=crlf
+*.py text eol=lf

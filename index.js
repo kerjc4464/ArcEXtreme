@@ -48,7 +48,7 @@ const FAST_BACKEND_MS = 12000;
 const ROUTE_LLM_MS = 25000;
 const EMBED_MS = 15000;
 const QUERY_MS = 12000;
-const RERANK_MS = 15000;
+const RERANK_MS = 45000; // 兜底：实际以 s.rerank.timeout 为准，需 >= 后端 httpx timeout，避免前端先掐
 const MAX_FAST_PATH_MS = 30000;
 // 后台任务按 chat 隔离，防止切聊后互相饿死；TTL 自清防止 LLM hang 死后永久占位
 const BG_FLAG_TTL_MS = 5 * 60 * 1000;
@@ -792,23 +792,29 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         }
 
         // Stage F：Rerank（仅对传统检索部分，限时，超时直接用原序放行）
+        // 超时三层对齐：withTimeout(前端) >= fetch Abort(cfg.timeout+10s) >= 后端 httpx(cfg.timeout)，避免 15s 误杀
         let rerankedTraditional = traditionalRetrieved;
         if (s.rerank.enabled && traditionalRetrieved.length && !fastExpired()) {
             setPipeline('rerank');
             notify('Rerank', null, '精排调用中…');
             try {
-                const rr = await withTimeout(rerank(s.rerank, contextText || userText, traditionalRetrieved.map((e) => e.event_text)), RERANK_MS, 'Rerank');
-                if (rr) {
+                const rerankMs = (Math.max(5, Math.min(300, Number(s.rerank?.timeout) || 40)) + 2) * 1000;
+                const rr = await withTimeout(rerank(s.rerank, contextText || userText, traditionalRetrieved.map((e) => e.event_text)), Math.max(rerankMs, RERANK_MS), 'Rerank');
+                if (rr && rr.length) {
                     rerankedTraditional = rr.map((r) => ({ ...traditionalRetrieved[r.index], score: r.score }));
                     notify('Rerank', true, `${rerankedTraditional.length} 条已重排`);
+                } else if (rr && !rr.length) {
+                    log('Rerank 返回 0 条（documents 为空或全过滤），用原序放行');
                 } else {
-                    notify('Rerank', false, '返回为空');
+                    notify('Rerank', false, '返回为空（已用原序放行，详见 Trace）');
                 }
             } catch (e) {
-                notify('Rerank', false, e.message);
+                notify('Rerank', false, `${e.message}（已用原序放行，不阻塞注入）`);
             }
         } else if (s.rerank.enabled && traditionalRetrieved.length && fastExpired()) {
             log('快路径超时，跳过Rerank直接注入');
+        } else if (s.rerank.enabled && !traditionalRetrieved.length && retrieved.length) {
+            log('Rerank 跳过：传统检索部分为空（检索结果全被回填消费），用原序放行');
         }
 
         // Stage G：升华 —— 快路径只读已固化记录用于注入；深度推理丢后台，不阻塞聊天
@@ -1659,6 +1665,7 @@ function populateForm() {
     setVal('arcextreme-rerank-url', s.rerank.apiUrl);
     setVal('arcextreme-rerank-key', s.rerank.apiKey);
     setVal('arcextreme-rerank-model', s.rerank.model);
+    setVal('arcextreme-rerank-timeout', s.rerank.timeout ?? 40);
 
     setVal('arcextreme-inject-position', s.inject.position);
     setVal('arcextreme-inject-depth', s.inject.depth);
@@ -1919,6 +1926,7 @@ function bindForm() {
     bindVal('arcextreme-rerank-url', (v) => { s.rerank.apiUrl = v; });
     bindVal('arcextreme-rerank-key', (v) => { s.rerank.apiKey = v; });
     bindVal('arcextreme-rerank-model', (v) => { s.rerank.model = v; });
+    bindVal('arcextreme-rerank-timeout', (v) => { s.rerank.timeout = Math.max(5, Math.min(300, Number(v) || 40)); });
 
     bindVal('arcextreme-inject-position', (v) => { s.inject.position = v; });
     bindVal('arcextreme-inject-depth', (v) => { s.inject.depth = Number(v) || 4; });

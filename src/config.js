@@ -249,6 +249,7 @@ export function defaultSettings() {
             apiUrl: '',
             apiKey: '',
             model: '',
+            timeout: 40,
         },
         // 注入位置（传统近期/检索注入）
         inject: {
@@ -284,7 +285,7 @@ export function mergeDefaults(target, defaults, isRoot = true) {
             for (const k of Object.keys(obj)) if (!allowed.includes(k) && topKeys.includes(k)) delete obj[k];
         };
         clean(target.embedding, ['source','apiUrl','apiKey','model']);
-        clean(target.rerank, ['enabled','apiUrl','apiKey','model']);
+        clean(target.rerank, ['enabled','apiUrl','apiKey','model','timeout']);
         clean(target.inject, ['position','depth','include_wi','depth_role']);
         clean(target.shortPool, ['perSoulCap','skipThreshold','stuckThreshold','subAgentMode','subAgentCollapseTrace','weight','retrievedSubAgent']);
         clean(target.shortPool?.weight, ['enabled','m0','m1','m2','m3']);
@@ -299,6 +300,7 @@ export function mergeDefaults(target, defaults, isRoot = true) {
     // 旧存档补 timeout 默认 40
     if (target.extractLLM && target.extractLLM.timeout == null) target.extractLLM.timeout = 40;
     if (target.routeLLM && target.routeLLM.timeout == null) target.routeLLM.timeout = 40;
+    if (target.rerank && target.rerank.timeout == null) target.rerank.timeout = 40;
     if (target.contextWindow == null) target.contextWindow = 5;
     if (target.routeContextWindow == null) target.routeContextWindow = 5;
     if (target.subAgentContextWindow == null) target.subAgentContextWindow = 10;
