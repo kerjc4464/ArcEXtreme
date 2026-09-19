@@ -142,7 +142,7 @@ function buildBody(cfg, messages, opts) {
 async function doFetch(bodyObj, cfg, directUrl, directHeaders, sessionId) {
     const backendBase = getBackendBase();
     const proxyUrl = `${backendBase}/api/llm_proxy`;
-    const timeout = Number(cfg.timeout ?? 40) || 40;
+    const timeout = Number(cfg.timeout ?? 60) || 60;
     const ctrl = new AbortController();
     const abortMs = (timeout + 10) * 1000;
     const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, abortMs);

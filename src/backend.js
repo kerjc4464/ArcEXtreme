@@ -32,8 +32,8 @@ function baseUrl() {
 // 供 UI 显示实际生效地址
 export function getEffectiveBackendUrl() { return baseUrl(); }
 
-// 本地后端均为轻量 IO，默认 12s 超时兜底，防止 fetch 无限挂起阻塞生成拦截
-const BACKEND_TIMEOUT_MS = 12000;
+// 后端 IO 默认 60s 超时兜底（mimo 等慢模型 + 局域网大包，12s 会误杀 short_pool/souls 拉取）
+const BACKEND_TIMEOUT_MS = 60000;
 
 async function fetchWithTimeout(url, opts = {}, ms = BACKEND_TIMEOUT_MS) {
     const ctrl = new AbortController();

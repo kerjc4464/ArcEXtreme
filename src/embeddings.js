@@ -27,13 +27,13 @@ function getBackendBase() {
     } catch { return 'http://127.0.0.1:9001'; }
 }
 
-async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 30) {
+async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 60) {
     const backendBase = getBackendBase();
     const { _source, _session_id, ...cleanPayload } = payload || {};
     const source = _source || 'openai';
     const session_id = _session_id || getOpencodeSessionId();
     const ctrl = new AbortController();
-    const abortMs = (Number(timeout) || 30) * 1000 + 10000;
+    const abortMs = (Number(timeout) || 60) * 1000 + 10000;
     const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, abortMs);
     try {
         const proxyRes = await fetch(`${backendBase}/api/embedding_proxy`, {
@@ -103,7 +103,7 @@ export async function embedTexts(cfg, texts) {
             const payload = { model: cfg.model, prompt: t };
             const target = base.endsWith('/api/embeddings') ? base : `${base}/api/embeddings`;
             // 走代理
-            const r = await fetchViaProxyOrDirect(target, { ...payload, _source: 'ollama' }, cfg.apiKey, 30);
+            const r = await fetchViaProxyOrDirect(target, { ...payload, _source: 'ollama' }, cfg.apiKey, 60);
             if (!r.ok) {
                 const txt = await r.text().catch(()=> '');
                 throw new Error(`Ollama embedding ${r.status}: ${txt.slice(0,200)}`);
@@ -120,7 +120,7 @@ export async function embedTexts(cfg, texts) {
     // openai / vllm 兼容 /embeddings
     const target = base.endsWith('/embeddings') ? base : `${base}/embeddings`;
     const payload = { model: cfg.model, input: texts };
-    const r = await fetchViaProxyOrDirect(target, { ...payload, _source: cfg.source }, cfg.apiKey, 30);
+    const r = await fetchViaProxyOrDirect(target, { ...payload, _source: cfg.source }, cfg.apiKey, 60);
     if (!r.ok) {
         const txt = await r.text().catch(()=> '');
         throw new Error(`Embedding ${r.status}: ${txt.slice(0,200)}`);

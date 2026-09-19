@@ -202,6 +202,31 @@ def _opencode_forward_headers(base_url: str, api_key: Optional[str], session_id:
         pass
     return headers
 
+def _proxy_err_detail(kind: str, url: str, req_payload: Any, timeout: Any, e: Exception) -> str:
+    """代理失败透传：异常空消息时回退 repr/type，绝不打 api_key。
+    返回形如 `LLM 代理转发失败 [ReadTimeout] ... | host=... | timeout=60s | model=...`。
+    """
+    try:
+        host = urllib.parse.urlparse(str(url or "")).hostname or "?"
+    except Exception:
+        host = "?"
+    try:
+        inner = req_payload if isinstance(req_payload, dict) else {}
+        model = inner.get("model", "?")
+    except Exception:
+        model = "?"
+    try:
+        etype = type(e).__name__ or "Error"
+    except Exception:
+        etype = "Error"
+    try:
+        emsg = (repr(e) or str(e) or "").strip() or "(empty)"
+    except Exception:
+        emsg = "(empty)"
+    if len(emsg) > 300:
+        emsg = emsg[:300] + "…"
+    return f"{kind}代理转发失败 [{etype}] {emsg} | host={host} | timeout={timeout}s | model={model}"
+
 def get_bucket(ts_ms: float) -> str:
     days = (time.time() * 1000 - ts_ms) / 86400000.0
     if days < 1:
@@ -532,7 +557,7 @@ class RerankProxy(BaseModel):
     url: str
     api_key: Optional[str] = None
     payload: dict
-    timeout: Optional[int] = 40
+    timeout: Optional[int] = 60
     verify_ssl: Optional[bool] = False
     session_id: Optional[str] = None
 
@@ -549,7 +574,7 @@ class EmbeddingProxy(BaseModel):
     api_key: Optional[str] = None
     payload: Dict[str, Any]
     source: Optional[str] = 'openai'
-    timeout: Optional[int] = 30
+    timeout: Optional[int] = 60
     verify_ssl: Optional[bool] = False
     session_id: Optional[str] = None
 
@@ -1887,8 +1912,8 @@ async def llm_proxy(payload: LLMProxy):
                 data = {"raw": r.text}
             return JSONResponse(content=data, status_code=r.status_code)
     except Exception as e:
-        logger.error(f"[llm_proxy] forward failed: {e}")
-        raise HTTPException(502, f"LLM 代理转发失败: {e}")
+        logger.exception(f"[llm_proxy] forward failed: {e!r}")
+        raise HTTPException(502, _proxy_err_detail("LLM", base, payload.payload, timeout, e))
 
 @app.post("/api/embedding_proxy")
 async def embedding_proxy(payload: EmbeddingProxy):
@@ -1909,7 +1934,7 @@ async def embedding_proxy(payload: EmbeddingProxy):
         if not base.endswith("/embeddings"):
             base = base + "/embeddings"
     headers = _opencode_forward_headers(base, payload.api_key, payload.session_id)
-    timeout = payload.timeout or 30
+    timeout = payload.timeout or 60
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=payload.verify_ssl) as client:
             r = await client.post(base, json=payload.payload, headers=headers)
@@ -1919,8 +1944,8 @@ async def embedding_proxy(payload: EmbeddingProxy):
                 data = {"raw": r.text}
             return JSONResponse(content=data, status_code=r.status_code)
     except Exception as e:
-        logger.error(f"[embedding_proxy] forward failed: {e}")
-        raise HTTPException(502, f"Embedding 代理转发失败: {e}")
+        logger.exception(f"[embedding_proxy] forward failed: {e!r}")
+        raise HTTPException(502, _proxy_err_detail("Embedding", base, payload.payload, timeout, e))
 
 @app.post("/api/rerank_proxy")
 async def rerank_proxy(payload: RerankProxy):
@@ -1935,7 +1960,7 @@ async def rerank_proxy(payload: RerankProxy):
             logger.warning(f"[rerank_proxy] forwarding to private address: {url}")
     except: pass
     headers = _opencode_forward_headers(url, payload.api_key, payload.session_id)
-    timeout = payload.timeout or 40
+    timeout = payload.timeout or 60
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=payload.verify_ssl) as client:
             r = await client.post(url, json=payload.payload, headers=headers)
@@ -1945,8 +1970,8 @@ async def rerank_proxy(payload: RerankProxy):
                 data = {"raw": r.text}
             return JSONResponse(content=data, status_code=r.status_code)
     except Exception as e:
-        logger.error(f"[rerank_proxy] forward failed: {e}")
-        raise HTTPException(502, f"Rerank 代理转发失败: {e}")
+        logger.exception(f"[rerank_proxy] forward failed: {e!r}")
+        raise HTTPException(502, _proxy_err_detail("Rerank", url, payload.payload, timeout, e))
 
 @app.get("/api/status")
 def status():

@@ -42,14 +42,16 @@ let lastQueryChatId = '';
 const QUERY_COOLDOWN = 2000;
 
 // ---- 生成拦截防阻塞：快慢分离 ----
-// 快路径（阻塞聊天）：近期/短期池快照 + 路由 + 向量检索 + 注入，必须秒级放行
+// 快路径（阻塞聊天）：近期/短期池快照 + 路由 + 向量检索 + 注入
 // 慢路径（后台追赶）：短期池SubAgent裁判 + A1检索二次裁判 + 升华，只改分/固化，不阻塞本次回复
-const FAST_BACKEND_MS = 12000;
-const ROUTE_LLM_MS = 25000;
-const EMBED_MS = 15000;
-const QUERY_MS = 12000;
-const RERANK_MS = 45000; // 兜底：实际以 s.rerank.timeout 为准，需 >= 后端 httpx timeout，避免前端先掐
-const MAX_FAST_PATH_MS = 30000;
+// 超时三层对齐：withTimeout(前端) >= fetch Abort(cfg.timeout+10s) >= 后端 httpx(cfg.timeout)
+// 起步 60s：mimo 等慢模型 + 5万 token 大包，12s/25s 会误杀
+const FAST_BACKEND_MS = 60000;
+const ROUTE_LLM_MS = 70000; // >= 路由 cfg.timeout(60)+10s 缓冲
+const EMBED_MS = 60000;
+const QUERY_MS = 60000;
+const RERANK_MS = 60000; // 兜底：实际以 s.rerank.timeout 为准，需 >= 后端 httpx timeout，避免前端先掐
+const MAX_FAST_PATH_MS = 180000; // 总预算：容纳 60s 级多步串行，快模式也不误杀
 // 后台任务按 chat 隔离，防止切聊后互相饿死；TTL 自清防止 LLM hang 死后永久占位
 const BG_FLAG_TTL_MS = 5 * 60 * 1000;
 const bgRunning = new Map(); // key: `${chatId}::${kind}` -> startTs
@@ -305,7 +307,7 @@ async function processUserInput(text, chatId, contextText = '') {
     let extracted;
     try {
         // 写入链路同样限时：超时则本轮跳过提炼，不卡 pipeline
-        const extractMs = (Number(s.extractLLM?.timeout) || 40) * 1000;
+        const extractMs = (Number(s.extractLLM?.timeout) || 60) * 1000;
         extracted = await withTimeout(extractEvents(s, text, soulNames, contextText, soulsContentsMapForExtract), extractMs, '事件提炼');
         const evts = extracted.events || [];
         if (!evts.length || !evts[0].event) {
@@ -410,11 +412,13 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         const contextTextRoute = buildContextText(source, s.routeContextWindow || 5);
         const contextTextSubAgent = buildContextText(source, s.subAgentContextWindow || 10);
         const contextText = contextTextExtract; // 兼容旧变量，默认用extract
-        // 快路径总预算：超时则跳过剩余慢阶段，直接用快照注入放行聊天
+        // 快路径总预算：超时则跳过剩余慢阶段，直接用快照注入放行聊天（全量模式不设限）
         const fastT0 = Date.now();
-        const fastExpired = () => (Date.now() - fastT0) > MAX_FAST_PATH_MS;
+        const isFull = (s.pipelineMode === 'full');
+        const fastExpired = () => isFull ? false : (Date.now() - fastT0) > MAX_FAST_PATH_MS;
+        if (isFull && s.debug) log('管线模式：全量·同步（池裁判+A1+升华全阻塞跑完再注入）');
 
-        // ---- Group0: 近期事件 + enabledSouls + 短期池 并发（无依赖，后端轻IO，12s兜底） ----
+        // ---- Group0: 近期事件 + enabledSouls + 短期池 并发（无依赖，后端 IO，60s兜底） ----
         setPipeline('extract');
         let recent = [];
         let enabledSoulsForStage = [];
@@ -493,9 +497,45 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         const skipThr = Number(s.shortPool?.skipThreshold||3);
         const routeCfgLocal = s.routeLLM.useExtract ? s.extractLLM : s.routeLLM;
 
-        // 后台：短期池SubAgent裁判（快照隔离 + 按chat防重入，不阻塞聊天）
+        // 池SubAgent裁判：高速模式丢后台（最终一致，下轮生效）；全量模式同步阻塞跑完再继续
         if (shortPoolItems.length && !soulMapUsable) {
-            log('[SubAgent后台]跳过：soul原文全失败，无依据不判，下轮重试');
+            log('[SubAgent]跳过：soul原文全失败，无依据不判，下轮重试');
+        } else if (isFull && shortPoolItems.length && soulMapUsable) {
+            // 全量同步：本次注入即含最新 counter/why
+            setPipeline('subagent');
+            try {
+                const poolFull = shortPoolItems.map(it=> ({
+                    event_id: it.id,
+                    soul: it.pool_soul || it.state_soul || it.soul,
+                    event_text: it.event_text,
+                    event: it.event_text,
+                    counter: it.counter ?? it.scounter ?? 2,
+                    birth_ts: it.birth_ts,
+                })).filter(x=>x.soul);
+                const effCfgFull = s.subAgentLLM?.useExtract ? s.extractLLM : s.subAgentLLM;
+                log(`[SubAgent同步] 启动 池${poolFull.length}条 (模型 ${(effCfgFull && effCfgFull.model)||'—'})`);
+                notify('SubAgent裁判', null, `${poolFull.length} 事件同步裁判中…阻塞本次注入`);
+                const evaluationsFull = await evaluateShortPool(s, poolFull, { ...unifiedSoulMap }, contextTextSubAgent, userText);
+                if (evaluationsFull.length) {
+                    const syncFull = await withTimeout(backend.syncShortPool(chatId, evaluationsFull), FAST_BACKEND_MS, '短期池同步');
+                    const cntFull = syncFull.count || 0;
+                    log(`[SubAgent同步]完成: ${evaluationsFull.map(e=>`${e.soul}#${e.event_id}:${e.action}`).join(' | ')}`);
+                    notify('SubAgent裁判', true, `${cntFull} 已更新(同步)`);
+                    const spFull = await withTimeout(backend.getShortPool(chatId, undefined, cap), FAST_BACKEND_MS, '短期池重拉').catch(()=>null);
+                    if (spFull) {
+                        let gFull = spFull.pools || {};
+                        if (enabledSetForStage.size) {
+                            const fg={}; for(const [k,v] of Object.entries(gFull)) if(enabledSetForStage.has(k)) fg[k]=v;
+                            gFull=fg;
+                        }
+                        shortPoolGrouped = gFull;
+                        shortPoolItems = (spFull.events || []).filter(it=> !enabledSetForStage.size || enabledSetForStage.has(it.pool_soul || it.state_soul || it.soul));
+                    }
+                }
+            } catch(e) {
+                log(`[SubAgent同步]失败，本轮用快照继续: ${e.message}`);
+                notify('SubAgent裁判', false, `${e.message}(已用快照继续)`);
+            }
         } else if (shortPoolItems.length && !fastExpired() && bgTake(chatId, 'pool')) {
             const poolSnap = shortPoolItems.map(it=> ({
                 event_id: it.id,
@@ -675,7 +715,88 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 const raCfg = s.shortPool?.retrievedSubAgent;
                 const raEnabled = raCfg ? raCfg.enabled !== false : true;
                 if (raEnabled && retrieved.length && !soulMapUsable) {
-                    log('[SubAgent检索后台]跳过：soul原文全失败，无依据不判，下轮重试');
+                    log('[SubAgent检索]跳过：soul原文全失败，无依据不判，下轮重试');
+                } else if (isFull && raEnabled && retrieved.length && soulMapUsable) {
+                    // 全量同步：检索二次裁判阻塞跑完，本次注入即含最新分
+                    setPipeline('subagent');
+                    try {
+                        const maxK = Math.max(1, Math.min(20, Number(raCfg?.maxItems ?? 10)));
+                        const includeTrad = raCfg?.includeTraditional !== false;
+                        let candEvents = [];
+                        if (fillerEvents.length) candEvents = [...fillerEvents];
+                        if (includeTrad && traditionalRetrieved.length) {
+                            const need = maxK - candEvents.length;
+                            if (need > 0) candEvents.push(...traditionalRetrieved.slice(0, need));
+                        }
+                        if (!candEvents.length) candEvents = retrieved.slice(0, maxK);
+                        else candEvents = candEvents.slice(0, maxK);
+                        const fillMapFull = new Map(fillItems.map(fi=>[fi.event_id, fi.soul]));
+                        const poolKeysFull = new Set(shortPoolItems.map(it=> `${it.id||it.event_id}::${it.pool_soul||it.state_soul||it.soul}`));
+                        const rawItemsFull = [];
+                        for (const ev of candEvents) {
+                            const soulsArr = Array.isArray(ev.souls) && ev.souls.length
+                                ? ev.souls
+                                : (ev.souls_str ? String(ev.souls_str).split(',').map(x=>x.trim()).filter(Boolean) : []);
+                            if (fillMapFull.has(ev.id)) {
+                                rawItemsFull.push({ event_id: ev.id, soul: fillMapFull.get(ev.id), event_text: ev.event_text || ev.event || '', event: ev.event_text || '', counter: ev.counter ?? ev.scounter ?? 2, birth_ts: ev.birth_ts || ev.timestamp || Date.now() });
+                            } else if (soulsArr.length) {
+                                for (const so of soulsArr) rawItemsFull.push({ event_id: ev.id, soul: so, event_text: ev.event_text || ev.event || '', event: ev.event_text || '', counter: ev.counter ?? ev.scounter ?? 2, birth_ts: ev.birth_ts || ev.timestamp || Date.now() });
+                            } else {
+                                rawItemsFull.push({ event_id: ev.id, soul: soulsSel[0] || 'general', event_text: ev.event_text || ev.event || '', event: ev.event_text || '', counter: ev.counter ?? ev.scounter ?? 2, birth_ts: ev.birth_ts || ev.timestamp || Date.now() });
+                            }
+                        }
+                        const seenFull = new Set();
+                        const evalItemsFull = [];
+                        for (const it of rawItemsFull) {
+                            if (!it.soul || !it.event_text) continue;
+                            const key = `${it.event_id}::${it.soul}`;
+                            if (poolKeysFull.has(key) || seenFull.has(key)) continue;
+                            seenFull.add(key);
+                            evalItemsFull.push(it);
+                        }
+                        if (!evalItemsFull.length) {
+                            if (s.debug) log('[SubAgent检索同步]跳过：候选均已在短期池裁判过');
+                        } else {
+                            notify('SubAgent裁判(检索)', null, `${evalItemsFull.length} 条检索结果同步裁判中…阻塞本次注入`);
+                            let localSoulMapFull = {};
+                            const needSoulsFull = [...new Set(evalItemsFull.map(x=>x.soul))];
+                            const missingFull = needSoulsFull.filter(n=> !unifiedSoulMap[n]);
+                            if (missingFull.length) {
+                                try {
+                                    const allSoulsFull = await withTimeout(backend.listSouls(), FAST_BACKEND_MS, 'Soul列表').catch(()=>[]);
+                                    const toFetchFull = allSoulsFull.filter(x=> missingFull.includes(x.name));
+                                    const resFull = await Promise.all(toFetchFull.map(so=> withTimeout(backend.getSoul(so.filename), FAST_BACKEND_MS, `Soul原文:${so.name}`).then(txt=>({name:so.name, txt})).catch(()=>null)));
+                                    for (const r of resFull) if (r) { localSoulMapFull[r.name]=r.txt; }
+                                } catch {}
+                            }
+                            for (const n of needSoulsFull) if (unifiedSoulMap[n]) localSoulMapFull[n]=unifiedSoulMap[n];
+                            if (!Object.keys(localSoulMapFull).length) { log('[SubAgent检索同步]跳过：无可用soul原文，下轮重试'); }
+                            else {
+                                const evalFull = await evaluateShortPool(s, evalItemsFull, localSoulMapFull, contextTextSubAgent, userText);
+                                if (evalFull.length) {
+                                    const hasRealFull = evalFull.some(e=> e.action !== 'Skip');
+                                    const syncFull2 = await withTimeout(backend.syncShortPool(chatId, evalFull), FAST_BACKEND_MS, '短期池同步');
+                                    const cntFull2 = syncFull2.count ?? evalFull.length;
+                                    if (hasRealFull) log(`[SubAgent检索同步]完成: ${evalFull.map(e=>`${e.soul}#${e.event_id}:${e.action}${e.why?`(${e.why.slice(0,30)})`:''}`).join(' | ')}`);
+                                    else log(`[SubAgent检索同步]完成: 全部Skip ${evalItemsFull.length}条`);
+                                    notify('SubAgent裁判(检索)', true, `${cntFull2} 已更新(同步)${hasRealFull?'':'(全Skip)'}`);
+                                    const spFull2 = await withTimeout(backend.getShortPool(chatId, undefined, cap), FAST_BACKEND_MS, '短期池重拉').catch(()=>null);
+                                    if (spFull2) {
+                                        let gFull2 = spFull2.pools || {};
+                                        if (enabledSetForStage.size) {
+                                            const fg={}; for(const [k,v] of Object.entries(gFull2)) if(enabledSetForStage.has(k)) fg[k]=v;
+                                            gFull2=fg;
+                                        }
+                                        shortPoolGrouped = gFull2;
+                                        shortPoolItems = (spFull2.events || []).filter(it=> !enabledSetForStage.size || enabledSetForStage.has(it.pool_soul || it.state_soul || it.soul));
+                                    }
+                                }
+                            }
+                        }
+                    } catch(e) {
+                        log(`[SubAgent检索同步]失败，本轮用快照继续: ${e.message}`);
+                        notify('SubAgent裁判(检索)', false, `${e.message}(已用快照继续)`);
+                    }
                 } else if (raEnabled && retrieved.length && bgTake(chatId, 'a1')) {
                     const retrievedSnap = retrieved.slice();
                     const fillerSnap = fillerEvents.slice();
@@ -798,7 +919,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             setPipeline('rerank');
             notify('Rerank', null, '精排调用中…');
             try {
-                const rerankMs = (Math.max(5, Math.min(300, Number(s.rerank?.timeout) || 40)) + 2) * 1000;
+                const rerankMs = (Math.max(5, Math.min(300, Number(s.rerank?.timeout) || 60)) + 2) * 1000;
                 const rr = await withTimeout(rerank(s.rerank, contextText || userText, traditionalRetrieved.map((e) => e.event_text)), Math.max(rerankMs, RERANK_MS), 'Rerank');
                 if (rr && rr.length) {
                     rerankedTraditional = rr.map((r) => ({ ...traditionalRetrieved[r.index], score: r.score }));
@@ -831,7 +952,60 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             }
         } catch {}
         if (s.sublimation?.enabled === false) {
-            if (s.debug) log('升华已关闭，跳过后台检测');
+            if (s.debug) log('升华已关闭，跳过检测');
+        } else if (isFull) {
+            // 全量同步：升华深度推理阻塞跑完，本次注入即含新固化
+            try {
+                setPipeline('sublimate');
+                notify('升华', null, '深度推理同步进行中…阻塞本次注入');
+                const thr = Number(s.shortPool?.stuckThreshold || 8);
+                let preCandidates = [];
+                try {
+                    const chk = await withTimeout(backend.checkSublimation(chatId, thr), FAST_BACKEND_MS, '升华检测');
+                    preCandidates = chk.candidates || [];
+                } catch (e) { log(`[升华同步]检测失败/超时: ${e.message}`); preCandidates = []; }
+                if (enabledSetForStage.size) preCandidates = preCandidates.filter(c=> enabledSetForStage.has(c.soul));
+                if (preCandidates.length) {
+                    const candSoulSet = new Set(preCandidates.map(c=>c.soul).filter(Boolean));
+                    let soulsAllSub = enabledSoulsForStage.length ? enabledSoulsForStage : await withTimeout(backend.listSouls(), FAST_BACKEND_MS, 'Soul列表').catch(()=>[]);
+                    const soulsSub = enabledSetForStage.size ? soulsAllSub.filter(so=> enabledSetForStage.has(so.name)) : soulsAllSub;
+                    const soulsToFetchForSub = candSoulSet.size ? soulsSub.filter(so=> candSoulSet.has(so.name)) : [];
+                    const soulsContentMap = {};
+                    if (soulsToFetchForSub.length) {
+                        const subResArr = await Promise.all(soulsToFetchForSub.map(so=> withTimeout(backend.getSoul(so.filename), FAST_BACKEND_MS, `升华Soul:${so.name}`).then(txt=>({so, txt, ok:true})).catch(e=>({so, err:e.message, ok:false}))));
+                        for (const r of (subResArr || [])) {
+                            if (r && r.ok) soulsContentMap[r.so.name] = r.txt;
+                        }
+                    }
+                    const mapForSub = Object.keys(soulsContentMap).length ? soulsContentMap : unifiedSoulMap;
+                    if (!Object.keys(mapForSub).length) { log('[升华同步]跳过：无可用soul原文，不做无依据升华'); }
+                    else {
+                        const subRes = await checkAndSublimate(s, chatId, contextTextSubAgent || contextText, mapForSub);
+                        if (subRes && subRes.length) {
+                            log(`[升华同步]完成 ${subRes.length} 条: ${subRes.map(x=>`【${x.soul}】${x.sublimated.slice(0,30)}`).join(' | ')}`);
+                            notify('升华', true, `${subRes.length} 条已固化到soul(同步)`);
+                            let curChat = '';
+                            try { curChat = getContext()?.chatId || getCurrentChatId(); } catch {}
+                            if (curChat && curChat !== chatId) {
+                                log(`[升华同步]已切chat(${String(chatId).slice(0,8)}→${String(curChat).slice(0,8)})：只写库不注入`);
+                            } else {
+                                try {
+                                    injectSublimated(s, subRes);
+                                    if (s.debug) refreshSouls();
+                                } catch (e) { log(`[升华同步]注入失败: ${e.message}`); }
+                            }
+                            if (s.debug) { try { refreshSublimated(); if(isDataModalOpen()){ refreshModalSublimated(); } } catch {} }
+                        } else {
+                            log('[升华同步]完成：本轮无可固化项');
+                        }
+                    }
+                } else {
+                    log('[升华同步]完成：无候选');
+                }
+            } catch(e) {
+                log(`[升华同步]失败，本轮跳过: ${e.message}`);
+                notify('升华', false, `${e.message}(已跳过)`);
+            }
         } else if (!fastExpired() && bgTake(chatId, 'sub')) {
             const chatSnapSub = chatId, ctxSnapSub = contextTextSubAgent || contextText;
             const soulMapSnapSub = { ...unifiedSoulMap };
@@ -883,7 +1057,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             log('升华后台进行中，本轮跳过（防堆积）');
         }
 
-        // Stage H：注入（快路径同步放行，慢任务已在后台追赶）
+        // Stage H：注入（高速模式慢任务已在后台追赶；全量模式全部已同步跑完）
         // 升华只走独立TAG（injectSublimated），主TAG不再重复内联，避免同一批出现两遍
         setPipeline('inject');
         const recentBlock = buildRecentBlock(recent, s.recentDays);
@@ -891,9 +1065,10 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         const shortPoolBlock = buildShortPoolBlock(shortPoolGrouped, cap);
         injectMemory(s, recentBlock, retrievedBlock, shortPoolBlock, '');
         const fastMs = Date.now() - fastT0;
-        const bgNote = (bgBusy(chatId, 'pool') || bgBusy(chatId, 'a1') || bgBusy(chatId, 'sub')) ? ' · 裁判/升华后台追赶中' : '';
-        notify('记忆注入', true, `短期池${Object.keys(shortPoolGrouped).length}魂 ${shortPoolItems.length}条 · 检索${rerankedTraditional.length} · 升华${sublimatedItems.length} · 分桶[${buckets.join(',')||'无'}] · ${fastMs}ms${bgNote}`);
-        log(`注入完成(${fastMs}ms)：短期池${shortPoolItems.length}条，检索${rerankedTraditional.length}条，升华${sublimatedItems.length}条，分桶[${buckets.join(',') || '无'}]${bgNote}`);
+        const modeTag = isFull ? '全量同步' : '高速异步';
+        const bgNote = (!isFull && (bgBusy(chatId, 'pool') || bgBusy(chatId, 'a1') || bgBusy(chatId, 'sub'))) ? ' · 裁判/升华后台追赶中' : '';
+        notify('记忆注入', true, `【${modeTag}】短期池${Object.keys(shortPoolGrouped).length}魂 ${shortPoolItems.length}条 · 检索${rerankedTraditional.length} · 升华${sublimatedItems.length} · 分桶[${buckets.join(',')||'无'}] · ${fastMs}ms${bgNote}`);
+        log(`注入完成(${fastMs}ms,${modeTag})：短期池${shortPoolItems.length}条，检索${rerankedTraditional.length}条，升华${sublimatedItems.length}条，分桶[${buckets.join(',') || '无'}]${bgNote}`);
         clearPipelineDelayed();
         if (s.debug){ refreshShortPool(); refreshSublimated(); if(isDataModalOpen()){ refreshModalShortPool(); refreshModalSublimated(); } }
     } catch (e) {
@@ -1599,6 +1774,7 @@ function populateForm() {
 
     setCheck('arcextreme-enabled', s.enabled);
     setCheck('arcextreme-debug', s.debug);
+    setVal('arcextreme-pipeline-mode', s.pipelineMode === 'full' ? 'full' : 'fast');
     setVal('arcextreme-backend', s.backendUrl);
 
     setVal('arcextreme-extract-url', s.extractLLM.apiUrl);
@@ -1792,6 +1968,10 @@ function bindForm() {
         await applyMasterState(v);
     });
     bindCheck('arcextreme-debug', (v) => { s.debug = v; });
+    bindVal('arcextreme-pipeline-mode', (v) => {
+        s.pipelineMode = (v === 'full') ? 'full' : 'fast';
+        try { log(`管线模式已切换为${s.pipelineMode === 'full' ? '全量·同步（池裁判+A1+升华全阻塞）' : '高速·异步（裁判/升华后台追赶）'}`); pushToast('ok', `管线：${s.pipelineMode === 'full' ? '全量·同步' : '高速·异步'}`); } catch {}
+    });
     bindVal('arcextreme-backend', (v) => { s.backendUrl = v; updateBackendEffective(); });
 
     function updateBackendEffective() {
@@ -1827,7 +2007,7 @@ function bindForm() {
     bindVal('arcextreme-extract-model', (v) => { s.extractLLM.model = v; });
     bindRangePair('arcextreme-extract-temp','arcextreme-extract-temp-num','arcextreme-extract-temp-val', (v)=>{ s.extractLLM.temperature = Number(v); });
     bindVal('arcextreme-extract-maxtokens', (v) => { s.extractLLM.maxTokens = Number(v)||0; });
-    bindVal('arcextreme-extract-timeout', (v) => { s.extractLLM.timeout = Number(v)||40; });
+    bindVal('arcextreme-extract-timeout', (v) => { s.extractLLM.timeout = Number(v)||60; });
     bindVal('arcextreme-extract-reasoning', (v) => { s.extractLLM.reasoningEffort = v; });
     bindVal('arcextreme-extract-reasoning-tokens', (v) => { s.extractLLM.reasoningTokens = Number(v)||0; });
     bindCheck('arcextreme-extract-sendtemp', (v) => { s.extractLLM.sendTempWithReasoning = v; });
@@ -1838,7 +2018,7 @@ function bindForm() {
     bindVal('arcextreme-route-model', (v) => { s.routeLLM.model = v; });
     bindRangePair('arcextreme-route-temp','arcextreme-route-temp-num','arcextreme-route-temp-val', (v)=>{ s.routeLLM.temperature = Number(v); });
     bindVal('arcextreme-route-maxtokens', (v) => { s.routeLLM.maxTokens = Number(v)||0; });
-    bindVal('arcextreme-route-timeout', (v) => { s.routeLLM.timeout = Number(v)||40; });
+    bindVal('arcextreme-route-timeout', (v) => { s.routeLLM.timeout = Number(v)||60; });
     bindVal('arcextreme-route-reasoning', (v) => { s.routeLLM.reasoningEffort = v; });
     bindVal('arcextreme-route-reasoning-tokens', (v) => { s.routeLLM.reasoningTokens = Number(v)||0; });
     bindCheck('arcextreme-route-sendtemp', (v) => { s.routeLLM.sendTempWithReasoning = v; });
@@ -1849,7 +2029,7 @@ function bindForm() {
     bindVal('arcextreme-subagent-model', (v)=>{ s.subAgentLLM.model=v; });
     bindRangePair('arcextreme-subagent-temp','arcextreme-subagent-temp-num','arcextreme-subagent-temp-val', (v)=>{ s.subAgentLLM.temperature=Number(v); });
     bindVal('arcextreme-subagent-maxtokens', (v)=>{ s.subAgentLLM.maxTokens=Number(v)||0; });
-    bindVal('arcextreme-subagent-timeout', (v)=>{ s.subAgentLLM.timeout=Number(v)||40; });
+    bindVal('arcextreme-subagent-timeout', (v)=>{ s.subAgentLLM.timeout=Number(v)||60; });
     bindVal('arcextreme-subagent-reasoning', (v)=>{ s.subAgentLLM.reasoningEffort=v; });
     bindVal('arcextreme-subagent-reasoning-tokens', (v)=>{ s.subAgentLLM.reasoningTokens=Number(v)||0; });
     bindCheck('arcextreme-subagent-sendtemp', (v)=>{ s.subAgentLLM.sendTempWithReasoning=v; });
@@ -1861,7 +2041,7 @@ function bindForm() {
     bindVal('arcextreme-sublimate-model', (v)=>{ s.sublimationLLM.model=v; });
     bindRangePair('arcextreme-sublimate-temp','arcextreme-sublimate-temp-num','arcextreme-sublimate-temp-val', (v)=>{ s.sublimationLLM.temperature=Number(v); });
     bindVal('arcextreme-sublimate-maxtokens', (v)=>{ s.sublimationLLM.maxTokens=Number(v)||0; });
-    bindVal('arcextreme-sublimate-timeout', (v)=>{ s.sublimationLLM.timeout=Number(v)||40; });
+    bindVal('arcextreme-sublimate-timeout', (v)=>{ s.sublimationLLM.timeout=Number(v)||60; });
     bindVal('arcextreme-sublimate-reasoning', (v)=>{ s.sublimationLLM.reasoningEffort=v; });
     bindVal('arcextreme-sublimate-reasoning-tokens', (v)=>{ s.sublimationLLM.reasoningTokens=Number(v)||0; });
     bindCheck('arcextreme-sublimate-sendtemp', (v)=>{ s.sublimationLLM.sendTempWithReasoning=v; });
@@ -1926,7 +2106,7 @@ function bindForm() {
     bindVal('arcextreme-rerank-url', (v) => { s.rerank.apiUrl = v; });
     bindVal('arcextreme-rerank-key', (v) => { s.rerank.apiKey = v; });
     bindVal('arcextreme-rerank-model', (v) => { s.rerank.model = v; });
-    bindVal('arcextreme-rerank-timeout', (v) => { s.rerank.timeout = Math.max(5, Math.min(300, Number(v) || 40)); });
+    bindVal('arcextreme-rerank-timeout', (v) => { s.rerank.timeout = Math.max(5, Math.min(300, Number(v) || 60)); });
 
     bindVal('arcextreme-inject-position', (v) => { s.inject.position = v; });
     bindVal('arcextreme-inject-depth', (v) => { s.inject.depth = Number(v) || 4; });

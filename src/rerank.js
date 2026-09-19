@@ -89,7 +89,7 @@ export async function rerank(cfg, query, documents) {
         } catch { session_id = 'arcextreme-backend'; }
     }
     // 超时三层对齐：后端 httpx(timeout) <= 前端 Abort(timeout+10s)。index.js 的 withTimeout 再包一层同样用 cfg.timeout。
-    const timeout = Math.max(5, Math.min(300, Number(cfg.timeout) || 40));
+    const timeout = Math.max(5, Math.min(300, Number(cfg.timeout) || 60));
     const tryProxy = async () => {
         const ctrl = new AbortController();
         const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, (timeout + 10) * 1000);

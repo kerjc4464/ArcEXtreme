@@ -146,7 +146,7 @@ export function defaultSettings() {
             model: '',
             temperature: 1.0,
             maxTokens: 2048,
-            timeout: 40,
+            timeout: 60,
             reasoningEffort: 'none',
             reasoningTokens: 0,
             sendTempWithReasoning: false,
@@ -159,7 +159,7 @@ export function defaultSettings() {
             useExtract: true,
             temperature: 1.0,
             maxTokens: 2048,
-            timeout: 40,
+            timeout: 60,
             reasoningEffort: 'none',
             reasoningTokens: 0,
             sendTempWithReasoning: false,
@@ -172,7 +172,7 @@ export function defaultSettings() {
             useExtract: true,
             temperature: 1.0,
             maxTokens: 2048,
-            timeout: 40,
+            timeout: 60,
             reasoningEffort: 'none',
             reasoningTokens: 0,
             sendTempWithReasoning: false,
@@ -249,7 +249,7 @@ export function defaultSettings() {
             apiUrl: '',
             apiKey: '',
             model: '',
-            timeout: 40,
+            timeout: 60,
         },
         // 注入位置（传统近期/检索注入）
         inject: {
@@ -259,6 +259,8 @@ export function defaultSettings() {
             depth_role: 'SYSTEM',
         },
         recentDays: 3,
+        // 流水线模式：fast=异步高速（裁判/升华丢后台不阻塞聊天，默认）；full=全量同步（池裁判+A1+升华全阻塞跑完）
+        pipelineMode: 'fast',
     };
 }
 
@@ -279,7 +281,7 @@ export function mergeDefaults(target, defaults, isRoot = true) {
     if (!isRoot) return target;
     // 自愈历史污染：旧递归bug会把顶层键塞入子对象（如 embedding 内出现 contextWindow）
     try {
-        const topKeys = ['enabled','debug','backendUrl','extractLLM','routeLLM','subAgentLLM','sublimationLLM','prompts','contextWindow','routeContextWindow','subAgentContextWindow','shortPool','sublimation','embedding','rerank','inject','recentDays'];
+        const topKeys = ['enabled','debug','backendUrl','extractLLM','routeLLM','subAgentLLM','sublimationLLM','prompts','contextWindow','routeContextWindow','subAgentContextWindow','shortPool','sublimation','embedding','rerank','inject','recentDays','pipelineMode'];
         const clean = (obj, allowed) => {
             if (!obj || typeof obj !== 'object') return;
             for (const k of Object.keys(obj)) if (!allowed.includes(k) && topKeys.includes(k)) delete obj[k];
@@ -297,10 +299,10 @@ export function mergeDefaults(target, defaults, isRoot = true) {
     if (target.embedding && target.embedding.source === 'openai_compatible') {
         target.embedding.source = 'openai';
     }
-    // 旧存档补 timeout 默认 40
-    if (target.extractLLM && target.extractLLM.timeout == null) target.extractLLM.timeout = 40;
-    if (target.routeLLM && target.routeLLM.timeout == null) target.routeLLM.timeout = 40;
-    if (target.rerank && target.rerank.timeout == null) target.rerank.timeout = 40;
+    // 旧存档补 timeout 默认 60
+    if (target.extractLLM && target.extractLLM.timeout == null) target.extractLLM.timeout = 60;
+    if (target.routeLLM && target.routeLLM.timeout == null) target.routeLLM.timeout = 60;
+    if (target.rerank && target.rerank.timeout == null) target.rerank.timeout = 60;
     if (target.contextWindow == null) target.contextWindow = 5;
     if (target.routeContextWindow == null) target.routeContextWindow = 5;
     if (target.subAgentContextWindow == null) target.subAgentContextWindow = 10;
@@ -322,10 +324,11 @@ export function mergeDefaults(target, defaults, isRoot = true) {
     }
     if (!target.subAgentLLM) target.subAgentLLM = structuredClone(defaultSettings().subAgentLLM);
     if (!target.sublimationLLM) target.sublimationLLM = structuredClone(defaultSettings().sublimationLLM);
-    if (target.subAgentLLM && target.subAgentLLM.timeout==null) target.subAgentLLM.timeout=40;
+    if (target.subAgentLLM && target.subAgentLLM.timeout==null) target.subAgentLLM.timeout=60;
     if (target.sublimationLLM && target.sublimationLLM.timeout==null) target.sublimationLLM.timeout=60;
     if (!target.sublimation) target.sublimation = structuredClone(defaultSettings().sublimation);
     if (!target.sublimation.inject) target.sublimation.inject = structuredClone(defaultSettings().sublimation.inject);
+    if (target.pipelineMode !== 'full' && target.pipelineMode !== 'fast') target.pipelineMode = 'fast';
     // 回填 subAgent/sublimation useExtract 默认（新版 subAgent 默认 true 保证开箱即用）
     if (target.subAgentLLM && target.subAgentLLM.useExtract==null) target.subAgentLLM.useExtract=true;
     if (target.sublimationLLM && target.sublimationLLM.useExtract==null) target.sublimationLLM.useExtract=false;

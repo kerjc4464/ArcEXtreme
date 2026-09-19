@@ -154,6 +154,8 @@ async function getTraceMod() {
 let _traceFilter = 'all';
 let _traceAutoCollapse = true;
 let _tracePage = 1;
+// 手动展开的条目 id：renderTraceList 每次重绘整表（每步 LLM begin/finish 都触发），需保留否则一点开就被冲掉
+const _openTraceIds = new Set();
 const TRACE_PAGE_SIZE = 12;
 export async function renderTraceList(entries) {
     const ul = document.getElementById('arcextreme-trace');
@@ -286,10 +288,25 @@ export async function renderTraceList(entries) {
         }
     }
     ul.innerHTML = (htmlParts.join('') || '') + pageSlice.map(e => {
-        const rawEsc = escapeHtml((e.raw || '').slice(0, 6000));
+        const rawText = (e.raw || '').slice(0, 6000);
+        // JSON 格式化后再展示：压缩单行改多行缩进，失败则原文照显
+        let rawPretty = rawText;
+        if (rawText) {
+            try { rawPretty = JSON.stringify(JSON.parse(rawText), null, 2).slice(0, 9000); }
+            catch {
+                try {
+                    const fence = rawText.match(/```(?:json)?\s*([\s\S]*?)```/i);
+                    const cand = (fence ? fence[1] : rawText).trim();
+                    const sIdx = cand.search(/[[{]/);
+                    const eIdx = cand.trim().startsWith('[') ? cand.lastIndexOf(']') : cand.lastIndexOf('}');
+                    if (sIdx >= 0 && eIdx > sIdx) rawPretty = JSON.stringify(JSON.parse(cand.slice(sIdx, eIdx + 1)), null, 2).slice(0, 9000);
+                } catch {}
+            }
+        }
+        const rawEsc = escapeHtml(rawPretty);
         const errEsc = escapeHtml(e.error || '');
         const modelEsc = escapeHtml(e.model || '—');
-        const cfg = e.cfgSnapshot ? `temp=${e.cfgSnapshot.temperature ?? '—'} · max=${e.cfgSnapshot.maxTokens ?? '—'} · reasoning=${escapeHtml(e.cfgSnapshot.reasoningEffort || 'none')}` : '';
+        const cfg = e.cfgSnapshot ? `${e.cfgSnapshot.host ? `host=${e.cfgSnapshot.host} · ` : ''}temp=${e.cfgSnapshot.temperature ?? '—'} · max=${e.cfgSnapshot.maxTokens ?? '—'} · reasoning=${escapeHtml(e.cfgSnapshot.reasoningEffort || 'none')}` : '';
         const preview = e.raw ? rawEsc.slice(0, 500) : (e.error ? `<span style="color:#f87171">${errEsc.slice(0,300)}</span>` : '<span style="opacity:.5">等待返回…</span>');
         const autoCollapsed = _traceAutoCollapse && e.status==='ok' && e.step!=='subagent';
         return `<li class="ax-trace__item is-${e.status}${autoCollapsed?'':''}" data-id="${e.id}" ${autoCollapsed?'':''}>
@@ -322,7 +339,14 @@ export async function renderTraceList(entries) {
         head.addEventListener('click', () => {
             const li = head.closest('.ax-trace__item');
             li.classList.toggle('is-open');
+            const id = Number(li.getAttribute('data-id'));
+            if (li.classList.contains('is-open')) _openTraceIds.add(id);
+            else _openTraceIds.delete(id);
         });
+    });
+    // 重绘会丢 is-open（innerHTML 全量重建），把手动展开的恢复
+    ul.querySelectorAll('.ax-trace__item').forEach(li => {
+        if (_openTraceIds.has(Number(li.getAttribute('data-id')))) li.classList.add('is-open');
     });
     // 复制需拿到 traceStore
     const mod = await getTraceMod();
@@ -363,9 +387,9 @@ export async function initTraceUI() {
             });
         });
         const collapseBtn=document.getElementById('arcextreme-trace-collapse-all');
-        if(collapseBtn) collapseBtn.addEventListener('click', ()=>{ document.querySelectorAll('.ax-trace__item').forEach(li=> li.classList.remove('is-open')); });
+        if(collapseBtn) collapseBtn.addEventListener('click', ()=>{ _openTraceIds.clear(); document.querySelectorAll('.ax-trace__item').forEach(li=> li.classList.remove('is-open')); });
         const expandBtn=document.getElementById('arcextreme-trace-expand-all2');
-        if(expandBtn) expandBtn.addEventListener('click', ()=>{ document.querySelectorAll('.ax-trace__item').forEach(li=> li.classList.add('is-open')); });
+        if(expandBtn) expandBtn.addEventListener('click', ()=>{ document.querySelectorAll('.ax-trace__item').forEach(li=> { li.classList.add('is-open'); _openTraceIds.add(Number(li.getAttribute('data-id'))); }); });
         const autoChk=document.getElementById('arcextreme-trace-autocollapse');
         if(autoChk) autoChk.addEventListener('change', ()=>{ _traceAutoCollapse=autoChk.checked; renderTraceList([...mod.traceStore]); });
         // 分页点击由外部控制：简单上下页

@@ -58,6 +58,13 @@
             <input type="checkbox" id="arcextreme-debug" />
             <span><i class="fa-solid fa-bug"></i> 调试日志</span>
         </label>
+        <label class="ax-quickbar__check" title="管线模式 — 高速=裁判/升华丢后台不阻塞聊天（默认）；全量=池裁判+A1+升华全部同步跑完再注入，最全但最慢">
+            <span><i class="fa-solid fa-diagram-project"></i> 管线</span>
+            <select id="arcextreme-pipeline-mode" class="text_pole" style="width:auto; padding:2px 6px; font-size:12px">
+                <option value="fast">高速·异步</option>
+                <option value="full">全量·同步</option>
+            </select>
+        </label>
         <div class="ax-quickbar__spacer"></div>
         <div class="ax-quickbar__actions">
             <div id="arcextreme-test" class="menu_button menu_button_icon ax-btn--ghost" title="测试后端连通性"><i class="fa-solid fa-plug"></i> 测试</div>
@@ -203,8 +210,8 @@
                     </label>
                     <div class="flex-container flexFlowColumn marginTop5">
                         <label for="arcextreme-extract-timeout"><small>超时 (秒)</small></label>
-                        <input type="number" id="arcextreme-extract-timeout" class="text_pole" min="5" max="300" step="1" placeholder="40" />
-                        <small class="ax-hint">默认 40 秒，可按网络自行调大</small>
+                        <input type="number" id="arcextreme-extract-timeout" class="text_pole" min="5" max="300" step="1" placeholder="60" />
+                        <small class="ax-hint">默认 60 秒，慢模型/大包建议保持 60 以上</small>
                     </div>
                 </div>
             </details>
@@ -280,8 +287,8 @@
                     </label>
                     <div class="flex-container flexFlowColumn marginTop5">
                         <label for="arcextreme-route-timeout"><small>超时 (秒)</small></label>
-                        <input type="number" id="arcextreme-route-timeout" class="text_pole" min="5" max="300" step="1" placeholder="40" />
-                        <small class="ax-hint">默认 40 秒</small>
+                        <input type="number" id="arcextreme-route-timeout" class="text_pole" min="5" max="300" step="1" placeholder="60" />
+                        <small class="ax-hint">默认 60 秒</small>
                     </div>
                 </div>
             </details>
@@ -350,8 +357,8 @@
             </div>
             <div class="flex-container flexFlowColumn marginTop5">
                 <label for="arcextreme-rerank-timeout"><small>超时 (秒)</small></label>
-                <input type="number" id="arcextreme-rerank-timeout" class="text_pole" min="5" max="300" step="1" placeholder="40" />
-                <small class="ax-hint">默认 40 秒，需 ≥ 后端转发超时，前端会自动 +10s/+2s 缓冲避免误杀</small>
+                <input type="number" id="arcextreme-rerank-timeout" class="text_pole" min="5" max="300" step="1" placeholder="60" />
+                <small class="ax-hint">默认 60 秒，需 ≥ 后端转发超时，前端会自动 +10s/+2s 缓冲避免误杀</small>
             </div>
         </div>
     </div>
@@ -663,7 +670,7 @@
                     </label>
                     <div class="flex-container flexFlowColumn marginTop5">
                         <label for="arcextreme-subagent-timeout"><small>超时 (秒)</small></label>
-                        <input type="number" id="arcextreme-subagent-timeout" class="text_pole" min="5" max="300" step="1" placeholder="40" />
+                        <input type="number" id="arcextreme-subagent-timeout" class="text_pole" min="5" max="300" step="1" placeholder="60" />
                     </div>
                 </div>
             </details>

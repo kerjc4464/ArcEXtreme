@@ -175,7 +175,7 @@
 .ax-badge--live { background: rgba(255,255,255,.10); color: var(--SmartThemeBodyColor); border: 1px solid var(--ax-border); animation: none; opacity:.85; }
 
 /* Trace specific — 密度重做：不折叠也能一眼扫清 */
-.ax-trace-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 520px; overflow-y: auto; }
+.ax-trace-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 640px; overflow-y: auto; }
 .ax-trace__empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 10px; border: 1px dashed var(--ax-border); border-radius: 10px; opacity: .6; font-size: 12px; text-align: center; }
 .ax-trace__batchhead { display:flex; align-items:center; gap:8px; padding:4px 8px; margin:4px 0 2px; font-size:11px; font-weight:700; opacity:.65; background: rgba(255,255,255,.04); border-left:3px solid var(--ax-border); border-radius:6px; }
 .ax-trace__batchhead .ax-trace__batchcount { font-weight:700; background:rgba(255,255,255,.08); padding:1px 6px; border-radius:20px; font-size:10px; }
@@ -209,7 +209,7 @@
 .ax-trace__filter { font-size:11px; font-weight:700; padding:3px 8px; border-radius:20px; cursor:pointer; background:rgba(255,255,255,.06); border:1px solid var(--ax-border); opacity:.7; transition:.15s; }
 .ax-trace__filter:hover { opacity:1; background:rgba(255,255,255,.10); }
 .ax-trace__filter.is-active { background: rgba(255,255,255,.12); color: var(--SmartThemeBodyColor); border-color: var(--ax-border); opacity:1; box-shadow:none; }
-.ax-trace__raw { margin: 0; padding: 8px 10px; font-family: var(--monoFontFamily); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow-y: auto; color: #cbd5e1; }
+.ax-trace__raw { margin: 0; padding: 8px 10px; font-family: var(--monoFontFamily); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow-y: auto; color: #cbd5e1; }
 .ax-trace__preview { font-size: 11px; opacity: .6; background: rgba(255,255,255,.04); padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; max-height: 80px; overflow: hidden; }
 
 /* Grids */

@@ -25,7 +25,7 @@ export function beginTrace(step, label, cfg, meta = {}) {
         raw: '',
         parsed: null,
         error: '',
-        cfgSnapshot: cfg ? { model: cfg.model, temperature: cfg.temperature, maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, reasoningTokens: cfg.reasoningTokens } : null,
+        cfgSnapshot: cfg ? { model: cfg.model, temperature: cfg.temperature, maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, reasoningTokens: cfg.reasoningTokens, host: (() => { try { return new URL(String(cfg.apiUrl || '').replace(/\/+$/, '')).hostname || ''; } catch { return ''; } })() } : null,
         meta,
         _t0: performance.now(),
     };
