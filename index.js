@@ -92,8 +92,8 @@ function launchBackground(promise, label, done) {
 
 function hashStr(s) {
     let h = 0;
-    const str = String(s || '');
-    for (let i = 0; i < str.length; i++) {
+    const str = typeof s === 'string' ? s : String(s || '');
+    for (let i = 0, n = str.length; i < n; i++) {
         h = ((h << 5) - h) + str.charCodeAt(i);
         h |= 0;
     }
@@ -126,9 +126,9 @@ function setPipeline(step) {
     if (!step) dots.forEach(d=>d.classList.remove('is-active','is-running'));
 }
 function compareStep(a, b) {
-    const order = ['extract','subagent','route','query','rerank','inject','sublimate'];
-    return order.indexOf(a) - order.indexOf(b);
+    return (_STEP_IDX.get(a) ?? -1) - (_STEP_IDX.get(b) ?? -1);
 }
+const _STEP_IDX = new Map([['extract', 0], ['subagent', 1], ['route', 2], ['query', 3], ['rerank', 4], ['inject', 5], ['sublimate', 6]]);
 function clearPipelineDelayed() {
     setTimeout(()=>setPipeline(null), 2800);
 }
@@ -238,7 +238,8 @@ async function onUserMessage(mesId) {
         lastUserHash = curHash;
         targetText = chat[mesId].mes;
     } else {
-        const lastUser = [...chat].reverse().find((m) => m.is_user);
+        let lastUser = null;
+        for (let i = chat.length - 1; i >= 0; i--) { const m = chat[i]; if (m && m.is_user) { lastUser = m; break; } }
         if (!lastUser || !lastUser.mes || !lastUser.mes.trim()) return;
         const curHash = hashStr(lastUser.mes);
         if (curHash === lastUserHash && typeof mesId === 'number') {
@@ -406,7 +407,8 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             return;
         }
         const source = chat && chat.length ? chat : ctx.chat || [];
-        const lastUser = [...source].reverse().find((m) => m.is_user);
+        let lastUser = null;
+        for (let i = source.length - 1; i >= 0; i--) { const m = source[i]; if (m && m.is_user) { lastUser = m; break; } }
         const userText = lastUser ? lastUser.mes : '';
         if (!userText) {
             clearInjection(s);

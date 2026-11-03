@@ -116,21 +116,34 @@ Soul原文(完整):
 相关对话窗口:
 {{context}}`;
 
+const TPL_RE = /\{\{(\w+)\}\}/g;
+const WS_RE = /\s+/g;
+
 export function renderPrompt(template, vars) {
     if (!template) return '';
-    return template.replace(/\{\{(\w+)\}\}/g, (_, k) => (k in vars ? String(vars[k] ?? '') : `{{${k}}}`));
+    TPL_RE.lastIndex = 0;
+    return template.replace(TPL_RE, (_, k) => (k in vars ? String(vars[k] ?? '') : `{{${k}}}`));
 }
 
 export function buildContextText(chat, n = 5) {
     if (!Array.isArray(chat) || !chat.length) return '';
-    const filtered = chat.filter(m => m && !m.is_system && typeof m.mes === 'string' && m.mes.trim());
-    const win = filtered.slice(-n);
-    const lines = win.map(m => {
+    // A13省内存/省单核：从尾单遍向前取n条，避免全量filter+slice+map；语义与原来相同
+    const win = [];
+    for (let i = chat.length - 1; i >= 0 && win.length < n; i--) {
+        const m = chat[i];
+        if (!m || m.is_system || typeof m.mes !== 'string') continue;
+        if (!m.mes.trim()) continue;
+        win.push(m);
+    }
+    win.reverse();
+    const lines = new Array(win.length);
+    for (let i = 0; i < win.length; i++) {
+        const m = win[i];
         const name = (m.name || (m.is_user ? '用户' : '助手')).trim();
         const role = m.is_user ? `用户(${name})` : `${name}`;
-        const msg = String(m.mes).slice(0, 800).replace(/\s+/g, ' ').trim();
-        return `${role}: ${msg}`;
-    });
+        const msg = String(m.mes).slice(0, 800).replace(WS_RE, ' ').trim();
+        lines[i] = `${role}: ${msg}`;
+    }
     return lines.join('\n').slice(0, 2500);
 }
 

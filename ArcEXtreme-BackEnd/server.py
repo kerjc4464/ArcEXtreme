@@ -68,6 +68,14 @@ def _is_private_url(url: str) -> bool:
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # 安全优化：WAL+中等同步+大缓存+内存临时表，只影响IO性能，不改变查询结果
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-64000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+    except Exception:
+        pass
     return conn
 
 def _column_exists(conn, table, col):
@@ -268,8 +276,7 @@ def _parse_souls_field(val):
         return []
     if s.startswith('['):
         try:
-            import json as _j
-            arr = _j.loads(s)
+            arr = _json.loads(s)
             if isinstance(arr, list):
                 return [str(x).strip() for x in arr if str(x).strip()]
         except: pass
@@ -279,8 +286,7 @@ def _parse_souls_field(val):
 
 def _souls_to_store(val):
     arr = _parse_souls_field(val)
-    import json as _j
-    return _j.dumps(arr, ensure_ascii=False) if arr else None
+    return _json.dumps(arr, ensure_ascii=False) if arr else None
 
 def get_event(eid: int):
     conn = get_db()
@@ -333,8 +339,7 @@ def serialize_event_with_state(row, state=None):
         except: why_log=None
         # why_log is JSON string
         try:
-            import json as _j
-            why_arr = _j.loads(why_log) if why_log else []
+            why_arr = _json.loads(why_log) if why_log else []
             if not isinstance(why_arr, list): why_arr=[]
         except: why_arr=[]
         base.update({
@@ -360,49 +365,73 @@ def ensure_index(dim: int):
 
 def load_index():
     global faiss_ids
-    conn = get_db()
-    rows = conn.execute("SELECT id, vector FROM events WHERE vector IS NOT NULL ORDER BY id").fetchall()
-    conn.close()
-    if not rows:
-        return
-    vecs = []
     faiss_ids = []
-    for r in rows:
-        try:
-            v = blob_to_vector(r["vector"])
-            if not v or not isinstance(v, list) or len(v)==0:
-                continue
-            vecs.append(v)
-            faiss_ids.append(r["id"])
-        except: pass
-    if not vecs:
-        return
-    # handle mixed dims: group by dim, pick majority
+    conn = get_db()
+    # 两遍式：先只取长度定多数维度（不物化Python float list，省内存/DDR），再分块拉多数维度批量add
+    try:
+        dim_rows = conn.execute("SELECT id, length(vector) AS n FROM events WHERE vector IS NOT NULL ORDER BY id").fetchall()
+    except Exception:
+        dim_rows = conn.execute("SELECT id, vector FROM events WHERE vector IS NOT NULL ORDER BY id").fetchall()
+        dim_rows = [{"id": r["id"], "n": len(r["vector"]) if r["vector"] is not None else 0} for r in dim_rows]
     from collections import Counter
-    dims = Counter(len(v) for v in vecs)
+    dims = Counter()
+    for r in dim_rows:
+        try:
+            n = r["n"] if "n" in r.keys() else None
+        except Exception:
+            n = None
+        if n is None or n <= 0 or (n % 4) != 0:
+            continue
+        dims[n // 4] += 1
+    if not dims:
+        conn.close()
+        return
     dim_major, _ = dims.most_common(1)[0]
     if len(dims) > 1:
-        print(f"[load_index] mixed dims detected {dict(dims)}, using majority {dim_major}, skipping {len(vecs)-dims[dim_major]} vectors")
-        filtered = []
-        fids = []
-        for v, fid in zip(vecs, faiss_ids):
-            if len(v)==dim_major:
-                filtered.append(v)
-                fids.append(fid)
-        vecs, faiss_ids = filtered, fids
-        if not vecs:
-            return
-    dim = len(vecs[0])
+        total = sum(dims.values())
+        print(f"[load_index] mixed dims detected {dict(dims)}, using majority {dim_major}, skipping {total-dims[dim_major]} vectors")
     try:
-        ensure_index(dim)
+        ensure_index(dim_major)
     except Exception as e:
-        print(f"[load_index] ensure_index failed dim {dim}: {e}")
+        print(f"[load_index] ensure_index failed dim {dim_major}: {e}")
+        conn.close()
         return
+    # 分块拉取：工作集保持在L2/LLC内，顺序与原来ORDER BY id一致
+    CHUNK = 2000
+    offset = 0
+    want_bytes = dim_major * 4
     try:
-        arr = np.asarray(vecs, dtype=np.float32)
-        faiss_index.add(arr)
-    except Exception as e:
-        print(f"[load_index] add failed: {e}")
+        while True:
+            rows = conn.execute("SELECT id, vector FROM events WHERE vector IS NOT NULL ORDER BY id LIMIT ? OFFSET ?", (CHUNK, offset)).fetchall()
+            if not rows:
+                break
+            offset += len(rows)
+            buf = []
+            ids = []
+            for r in rows:
+                try:
+                    blob = r["vector"]
+                    if blob is None or len(blob) != want_bytes:
+                        continue
+                    v = np.frombuffer(blob, dtype=np.float32)
+                    if v.shape[0] != dim_major:
+                        continue
+                    buf.append(v)
+                    ids.append(r["id"])
+                except Exception:
+                    pass
+            if buf:
+                try:
+                    arr = np.stack(buf).astype(np.float32, copy=False)
+                    arr = np.ascontiguousarray(arr, dtype=np.float32)
+                    faiss_index.add(arr)
+                    faiss_ids.extend(ids)
+                except Exception as e:
+                    print(f"[load_index] add failed: {e}")
+            if len(rows) < CHUNK:
+                break
+    finally:
+        conn.close()
 
 def age_days(ts_ms: float) -> float:
     return (time.time() * 1000 - ts_ms) / 86400000.0
@@ -1318,7 +1347,7 @@ def insert_event(payload: EventInsert):
             souls_store,
             payload.event_text,
             vector_to_blob(vec),
-            __import__("json").dumps(payload.metadata or {}),
+            _json.dumps(payload.metadata or {}),
             counter,
         ),
     )
@@ -1450,50 +1479,72 @@ def query_events(payload: EventQuery):
     # also support {m0:1.2}?
 
     results = []
+    # 批量：一次IN查全量events + 复用同一连接做counter回退，避免N+1次open/close（结果与原来逐条get_event逐字节一致）
+    cands = []
     for dist, pos in zip(D[0], I[0]):
         if pos == -1:
             continue
-        eid = faiss_ids[pos]
-        ev = get_event(eid)
-        if ev is None or ev["chat_id"] != payload.chat_id:
-            continue
-        # use last_active_at for bucket check if available
-        ts_for_bucket = ev.get("last_active_at") or ev["timestamp"]
-        if not event_qualifies(ts_for_bucket, ev["time_bucket"], payload.buckets):
-            continue
-        if payload.souls:
-            ev_souls = ev.get("souls") or []
-            if isinstance(ev_souls, str):
-                ev_souls = _parse_souls_field(ev_souls)
-            if not ev_souls:
-                continue
-            if not any(s in ev_souls for s in payload.souls):
-                continue
-        sim = 1.0 - float(dist) / 2.0
-        # apply weight if we have counter
-        # need to fetch counter from state? use events.counter as fallback, else event_soul_state
-        # try to get max counter among relevant souls for weighting
-        # if ev has single soul, use that
-        # otherwise, use generic counter field
-        c = ev.get("counter")
-        if c is None:
-            # try state lookup for any of payload souls
+        cands.append((float(dist), faiss_ids[pos]))
+    if not cands:
+        return {"results": []}
+    uniq_ids = list(dict.fromkeys(eid for _, eid in cands))
+    conn = get_db()
+    try:
+        placeholders = ",".join(["?"] * len(uniq_ids))
+        rows = conn.execute(f"SELECT * FROM events WHERE id IN ({placeholders})", tuple(uniq_ids)).fetchall()
+        row_by_id = {}
+        for r in rows:
             try:
-                conn = get_db()
-                prow = conn.execute("SELECT counter FROM event_soul_state WHERE event_id=? LIMIT 1", (eid,)).fetchone()
-                conn.close()
-                if prow:
-                    c = prow["counter"]
-            except: pass
-        if c is not None and c in wmap:
-            sim = sim * wmap[c]
-        # support m0-m3 keys
-        # fallback if wm has m0
-        if payload.weightMultipliers and f"m{c}" in payload.weightMultipliers:
-            try:
-                sim = sim * float(payload.weightMultipliers[f"m{c}"])
-            except: pass
-        results.append({**ev, "score": sim, "weighted": bool(c in wmap)})
+                row_by_id[r["id"]] = r
+            except Exception:
+                pass
+        for dist, eid in cands:
+            r = row_by_id.get(eid)
+            if r is None:
+                continue
+            ev = serialize_event(r)
+            if ev is None or ev["chat_id"] != payload.chat_id:
+                continue
+            # use last_active_at for bucket check if available
+            ts_for_bucket = ev.get("last_active_at") or ev["timestamp"]
+            if not event_qualifies(ts_for_bucket, ev["time_bucket"], payload.buckets):
+                continue
+            if payload.souls:
+                ev_souls = ev.get("souls") or []
+                if isinstance(ev_souls, str):
+                    ev_souls = _parse_souls_field(ev_souls)
+                if not ev_souls:
+                    continue
+                if not any(s in ev_souls for s in payload.souls):
+                    continue
+            sim = 1.0 - float(dist) / 2.0
+            # apply weight if we have counter
+            # need to fetch counter from state? use events.counter as fallback, else event_soul_state
+            # try to get max counter among relevant souls for weighting
+            # if ev has single soul, use that
+            # otherwise, use generic counter field
+            c = ev.get("counter")
+            if c is None:
+                # try state lookup for any of payload souls
+                try:
+                    prow = conn.execute("SELECT counter FROM event_soul_state WHERE event_id=? LIMIT 1", (eid,)).fetchone()
+                    if prow:
+                        c = prow["counter"]
+                except: pass
+            if c is not None and c in wmap:
+                sim = sim * wmap[c]
+            # support m0-m3 keys
+            # fallback if wm has m0
+            if payload.weightMultipliers and f"m{c}" in payload.weightMultipliers:
+                try:
+                    sim = sim * float(payload.weightMultipliers[f"m{c}"])
+                except: pass
+            results.append({**ev, "score": sim, "weighted": bool(c in wmap)})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
     results.sort(key=lambda x: -x["score"])
     return {"results": results[: payload.k]}
 
@@ -1547,8 +1598,7 @@ def list_events(chat_id: str, with_counters: int = 0, soul: Optional[str]=None, 
                 d["state_soul"] = r["state_soul"]
                 d["why_init"] = r["why_init"]
                 try:
-                    import json as _j2
-                    d["why_log"] = _j2.loads(r["why_log"]) if r["why_log"] else []
+                    d["why_log"] = _json.loads(r["why_log"]) if r["why_log"] else []
                 except:
                     d["why_log"] = []
             except: pass
@@ -1699,8 +1749,7 @@ def api_sync_short_pool(payload: ShortPoolSync):
         # why_log: only +1/-1 appends
         try:
             old_why_log = row["why_log"] if "why_log" in row.keys() else None
-            import json as _j
-            why_log = _j.loads(old_why_log) if old_why_log else []
+            why_log = _json.loads(old_why_log) if old_why_log else []
             if not isinstance(why_log, list): why_log=[]
         except:
             why_log=[]
@@ -1709,11 +1758,11 @@ def api_sync_short_pool(payload: ShortPoolSync):
             # keep last 20
             if len(why_log) > 20:
                 why_log = why_log[-20:]
-            why_log_str = __import__("json").dumps(why_log, ensure_ascii=False)
+            why_log_str = _json.dumps(why_log, ensure_ascii=False)
         else:
             # Skip不追加
             try:
-                why_log_str = __import__("json").dumps(why_log, ensure_ascii=False) if why_log else '[]'
+                why_log_str = _json.dumps(why_log, ensure_ascii=False) if why_log else '[]'
             except:
                 why_log_str = '[]'
         # handle saturated +1/-1 with no counter change but action indicates attempt: still not append? spec says to顶不追加，所以若新旧相等且为饱和则不算更新，不追加
@@ -1722,7 +1771,7 @@ def api_sync_short_pool(payload: ShortPoolSync):
             # 饱和不追加，移除刚加的
             if why_log and why_log[-1].get("why")==why:
                 why_log.pop()
-                why_log_str = __import__("json").dumps(why_log, ensure_ascii=False)
+                why_log_str = _json.dumps(why_log, ensure_ascii=False)
         conn.execute("UPDATE event_soul_state SET counter=?, skip=?, stuck=?, last_eval=?, why_log=? WHERE event_id=? AND soul=?",
             (new_counter, new_skip, new_stuck, now, why_log_str, eid, soul))
         conn.execute("UPDATE events SET last_active_at=?, counter=? WHERE id=?", (now, new_counter, eid))
@@ -1993,6 +2042,20 @@ def status():
 
 @app.on_event("startup")
 def startup():
+    # 线程收敛：FAISS/OpenBLAS超线程抢端口反而慢，限制为物理核数（结果不变，只影响速度）
+    try:
+        ncpu = os.cpu_count() or 4
+        want = max(1, min(4, ncpu))
+        import faiss as _faiss
+        if hasattr(_faiss, "omp_set_num_threads"):
+            _faiss.omp_set_num_threads(want)
+    except Exception:
+        pass
+    for _k, _v in (("OMP_NUM_THREADS", "4"), ("OPENBLAS_NUM_THREADS", "4"), ("MKL_NUM_THREADS", "4")):
+        try:
+            os.environ.setdefault(_k, _v)
+        except Exception:
+            pass
     init_db()
     load_index()
 

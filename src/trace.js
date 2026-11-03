@@ -3,13 +3,36 @@ let _seq = 0;
 export const traceStore = []; // {id, ts, step, label, model, status, ms, raw, parsed, error, cfgSnapshot}
 
 const listeners = new Set();
-function emit() { for (const fn of listeners) try { fn([...traceStore]); } catch {} }
+function emit() { for (const fn of listeners) try { fn(traceStore); } catch {} }
 
 export function onTrace(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 
 export function clearTrace() {
     traceStore.length = 0;
     emit();
+}
+
+const HOST_RE = /^(?:https?:\/\/)?(\[[^\]]+\]|[^/:?#]+)/;
+function _hostOf(url) {
+    try {
+        const s = String(url || '').replace(/\/+$/, '');
+        if (!s) return '';
+        // 快路径：正则取host，避免new URL的ICU/异常开销（A13小核友好；与URL.hostname逐字节一致：小写、去user@/端口、IPv6保留括号）
+        const m = s.match(HOST_RE);
+        if (!m) return '';
+        let h = m[1] || '';
+        if (/[\s<>\"\\^`{|}]/.test(h)) return '';
+        const at = h.lastIndexOf('@');
+        if (at >= 0) h = h.slice(at + 1);
+        if (h[0] === '[') {
+            const e = h.indexOf(']');
+            h = e >= 0 ? h.slice(0, e + 1) : h;
+        } else {
+            const colon = h.indexOf(':');
+            if (colon >= 0) h = h.slice(0, colon);
+        }
+        return h.toLowerCase();
+    } catch { return ''; }
 }
 
 export function beginTrace(step, label, cfg, meta = {}) {
@@ -25,7 +48,7 @@ export function beginTrace(step, label, cfg, meta = {}) {
         raw: '',
         parsed: null,
         error: '',
-        cfgSnapshot: cfg ? { model: cfg.model, temperature: cfg.temperature, maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, reasoningTokens: cfg.reasoningTokens, host: (() => { try { return new URL(String(cfg.apiUrl || '').replace(/\/+$/, '')).hostname || ''; } catch { return ''; } })() } : null,
+        cfgSnapshot: cfg ? { model: cfg.model, temperature: cfg.temperature, maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, reasoningTokens: cfg.reasoningTokens, host: _hostOf(cfg.apiUrl) } : null,
         meta,
         _t0: performance.now(),
     };

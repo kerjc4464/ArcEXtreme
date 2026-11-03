@@ -1,31 +1,5 @@
 // Embedding：支持 openai / vllm / ollama，狠狠走后端代理规避 CORS
-import { SETTINGS_KEY } from './config.js';
-
-function getBackendBase() {
-    try {
-        const s = window.extension_settings?.[SETTINGS_KEY];
-        let raw = s?.backendUrl;
-        let u = String(raw || '').trim();
-        if (!u) {
-            const pageHost = window.location.hostname;
-            if (pageHost && pageHost !== '' && pageHost !== '127.0.0.1' && pageHost !== 'localhost') {
-                return `http://${pageHost}:9001`;
-            }
-            return 'http://127.0.0.1:9001';
-        }
-        u = u.replace(/\/+$/, '');
-        try {
-            const pageHost = window.location.hostname;
-            const backendHost = new URL(u).hostname;
-            if ((backendHost === '127.0.0.1' || backendHost === 'localhost') && pageHost && pageHost !== '127.0.0.1' && pageHost !== 'localhost' && pageHost !== '') {
-                const fixed = u.replace(backendHost, pageHost);
-                console.warn(`[ArcEXtreme] 后端地址自动修正：${u} -> ${fixed}`);
-                return fixed;
-            }
-        } catch {}
-        return u;
-    } catch { return 'http://127.0.0.1:9001'; }
-}
+import { getBackendBase } from './backendUrl.js';
 
 async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 60) {
     const backendBase = getBackendBase();
@@ -71,22 +45,32 @@ async function fetchViaProxyOrDirect(targetUrl, payload, apiKey, timeout = 60) {
     }
 }
 
+const SID_SANITIZE_RE = /[^A-Za-z0-9_-]/g;
+let _embChatCache = { chatId: null, sid: null };
+let _embFallbackSid = null;
 function getOpencodeSessionId() {
     try {
         const ctx = window.SillyTavern?.getContext?.() || null;
         const chatId = ctx?.chatId;
         if (chatId) {
-            const s = String(chatId).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
-            if (s) return s.startsWith('arcextreme-') ? s : `arcextreme-${s}`;
+            if (chatId === _embChatCache.chatId && _embChatCache.sid) return _embChatCache.sid;
+            const s = String(chatId).replace(SID_SANITIZE_RE, '_').slice(0, 64);
+            if (s) {
+                const sid = s.startsWith('arcextreme-') ? s : `arcextreme-${s}`;
+                _embChatCache = { chatId, sid };
+                return sid;
+            }
         }
     } catch {}
+    if (_embFallbackSid) return _embFallbackSid;
     try {
         const KEY = 'arcextreme_opencode_session';
         const old = localStorage.getItem(KEY);
-        if (old && String(old).startsWith('arcextreme-')) return old;
+        if (old && String(old).startsWith('arcextreme-')) { _embFallbackSid = old; return old; }
         const hex = Math.random().toString(16).slice(2, 14).padEnd(12, '0');
         const sid = `arcextreme-${hex}`;
         localStorage.setItem(KEY, sid);
+        _embFallbackSid = sid;
         return sid;
     } catch { return 'arcextreme-backend'; }
 }
@@ -98,22 +82,27 @@ export async function embedTexts(cfg, texts) {
     if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
 
     if (cfg.source === 'ollama') {
-        const out = [];
-        for (const t of texts) {
-            const payload = { model: cfg.model, prompt: t };
-            const target = base.endsWith('/api/embeddings') ? base : `${base}/api/embeddings`;
-            // 走代理
-            const r = await fetchViaProxyOrDirect(target, { ...payload, _source: 'ollama' }, cfg.apiKey, 60);
-            if (!r.ok) {
-                const txt = await r.text().catch(()=> '');
-                throw new Error(`Ollama embedding ${r.status}: ${txt.slice(0,200)}`);
+        // 并发但保序：Promise.all结果顺序与texts一致；限制单次并发避免小核过载
+        const target = base.endsWith('/api/embeddings') ? base : `${base}/api/embeddings`;
+        const CONC = Math.min(6, Math.max(2, texts.length));
+        const out = new Array(texts.length);
+        let idx = 0;
+        const workers = new Array(Math.min(CONC, texts.length)).fill(0).map(async () => {
+            while (true) {
+                const i = idx++;
+                if (i >= texts.length) return;
+                const r = await fetchViaProxyOrDirect(target, { model: cfg.model, prompt: texts[i], _source: 'ollama' }, cfg.apiKey, 60);
+                if (!r.ok) {
+                    const txt = await r.text().catch(()=> '');
+                    throw new Error(`Ollama embedding ${r.status}: ${txt.slice(0,200)}`);
+                }
+                const d = await r.json();
+                const emb = d.embedding || d.data?.[0]?.embedding;
+                if (!emb) throw new Error('Ollama embedding 返回异常');
+                out[i] = emb;
             }
-            const d = await r.json();
-            // 代理返回的 d 可能是 {embedding: [...]} 或 {data: ...}，兼容两种
-            const emb = d.embedding || d.data?.[0]?.embedding;
-            if (!emb) throw new Error('Ollama embedding 返回异常');
-            out.push(emb);
-        }
+        });
+        await Promise.all(workers);
         return out;
     }
 

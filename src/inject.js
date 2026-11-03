@@ -24,14 +24,40 @@ function roleSub(settings) {
     return extension_prompt_roles[inj.depth_role] ?? extension_prompt_roles.SYSTEM;
 }
 
+const _soulsCache = new Map();
+const _soulsStrCache = new Map();
 function fmtSouls(e) {
-    let arr = e.souls;
-    if (Array.isArray(arr)) arr = arr.filter(Boolean);
-    else if (typeof arr === 'string' && arr.trim()) {
-        try { const p = JSON.parse(arr); arr = Array.isArray(p) ? p : [arr]; } catch { arr = arr.includes(',') ? arr.split(',').map(s=>s.trim()).filter(Boolean) : [arr]; }
-    } else if (e.souls_str) arr = String(e.souls_str).split(',').map(s=>s.trim()).filter(Boolean);
-    else arr = [];
-    return arr.length ? ` (${arr.join(', ')})` : '';
+    const arr0 = e.souls;
+    if (Array.isArray(arr0)) {
+        let hasEmpty = false;
+        for (let i = 0; i < arr0.length; i++) { if (!arr0[i]) { hasEmpty = true; break; } }
+        if (!hasEmpty) return arr0.length ? ` (${arr0.join(', ')})` : '';
+        const arr = arr0.filter(Boolean);
+        return arr.length ? ` (${arr.join(', ')})` : '';
+    }
+    if (typeof arr0 === 'string' && arr0.trim()) {
+        // 有界缓存：同一souls字符串反复出现时命中，避免重复JSON.parse/split（输出与原来逐字节一致）
+        let arr = _soulsCache.get(arr0);
+        if (!arr) {
+            try { const p = JSON.parse(arr0); arr = Array.isArray(p) ? p : [arr0]; }
+            catch { arr = arr0.includes(',') ? arr0.split(',').map(s=>s.trim()).filter(Boolean) : [arr0]; }
+            if (_soulsCache.size > 200) _soulsCache.clear();
+            _soulsCache.set(arr0, arr);
+        }
+        return arr.length ? ` (${arr.join(', ')})` : '';
+    }
+    if (e.souls_str) {
+        // souls_str与souls解析规则不同，分开缓存避免键碰撞
+        const key = String(e.souls_str);
+        let arr = _soulsStrCache.get(key);
+        if (!arr) {
+            arr = key.split(',').map(s=>s.trim()).filter(Boolean);
+            if (_soulsStrCache.size > 200) _soulsStrCache.clear();
+            _soulsStrCache.set(key, arr);
+        }
+        return arr.length ? ` (${arr.join(', ')})` : '';
+    }
+    return '';
 }
 export function buildRecentBlock(events, days) {
     if (!events || !events.length) return '';

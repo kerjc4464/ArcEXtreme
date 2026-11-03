@@ -1,7 +1,25 @@
 // 调试日志与列表渲染 — Modernized + Trace (容错：trace 可选)
+// A13优化：escape用分支避免逐字符对象分配；日志/列表用缓冲+委托+rAF减少主线程唤醒
 function escapeHtml(s) {
-    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const str = String(s ?? '');
+    if (!str) return '';
+    let out = '';
+    let last = 0;
+    for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i);
+        let ent = null;
+        if (c === 38) ent = '&amp;';
+        else if (c === 60) ent = '&lt;';
+        else if (c === 62) ent = '&gt;';
+        else if (c === 34) ent = '&quot;';
+        else if (c === 39) ent = '&#39;';
+        if (ent) { out += str.slice(last, i) + ent; last = i + 1; }
+    }
+    return last ? out + str.slice(last) : str;
 }
+
+const LOG_OK_RE = /后端状态|已重建|已记录|注入完成/;
+const LOG_ERR_RE = /不可达|失败|错误/;
 
 function setStatus(state, text) {
     const dot = document.getElementById('arcextreme-status-dot');
@@ -11,16 +29,28 @@ function setStatus(state, text) {
     lab.textContent = text;
 }
 
+const _logBuf = [];
+let _logScheduled = false;
 export function log(msg) {
     const el = document.getElementById('arcextreme-log');
     if (!el) return;
-    const ts = new Date().toLocaleTimeString();
-    const lines = (el.textContent || '').split('\n');
-    if (lines.length > 180) el.textContent = lines.slice(-120).join('\n') + '\n';
-    el.textContent += `[${ts}] ${msg}\n`;
-    el.scrollTop = el.scrollHeight;
-    if (/后端状态|已重建|已记录|注入完成/.test(msg)) setStatus('ok', '已连接');
-    else if (/不可达|失败|错误/.test(msg)) setStatus('err', '异常');
+    // A13省大核：内存环形缓冲+批量刷DOM，避免每次split(textContent)+强制布局；时间戳与原来完全一致
+    _logBuf.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
+    if (_logBuf.length > 180) _logBuf.splice(0, _logBuf.length - 180);
+    if (LOG_OK_RE.test(msg)) setStatus('ok', '已连接');
+    else if (LOG_ERR_RE.test(msg)) setStatus('err', '异常');
+    if (!_logScheduled) {
+        _logScheduled = true;
+        requestAnimationFrame(() => {
+            _logScheduled = false;
+            try {
+                // 每次最多重写120行，防止超长字符串拷贝唤醒大核
+                const start = Math.max(0, _logBuf.length - 120);
+                el.textContent = _logBuf.slice(start).join('\n') + '\n';
+                el.scrollTop = el.scrollHeight;
+            } catch {}
+        });
+    }
 }
 
 export function renderSoulsList(items, opts={}) {
@@ -32,8 +62,7 @@ export function renderSoulsList(items, opts={}) {
         return;
     }
     const onToggle = opts.onToggle;
-    const enabledMap = opts.enabledMap;
-    const enabledCount = items.filter(s=> s.enabled !== false).length;
+    _soulsToggleFn = onToggle || null;
     // header summary is handled by caller, but we update disabled style
     ul.innerHTML = items
         .map((s) => {
@@ -47,17 +76,22 @@ export function renderSoulsList(items, opts={}) {
             return `<li title="${title}" class="ax-soul__row${disClass}"><span class="tag tag--soul">${fmt}</span><span class="ax-event__text" style="${enabled?'':'opacity:.45;text-decoration:line-through'}">${name}${enabled?'':' <small style="opacity:.6">(已禁用)</small>'}</span>${toggle}</li>`;
         })
         .join('');
-    if (onToggle) {
-        ul.querySelectorAll('input[data-soul]').forEach(chk=>{
-            chk.addEventListener('change', async ()=>{
-                const soulName = chk.getAttribute('data-soul');
-                const val = chk.checked;
-                chk.disabled = true;
-                try { await onToggle(soulName, val); } catch(e){ pushToast('fail', `Soul切换失败: ${e.message}`); chk.checked = !val; }
-                finally { chk.disabled = false; }
-            });
-        });
-    }
+    ensureSoulsDelegation(ul);
+}
+let _soulsToggleFn = null;
+let _soulsDelegated = false;
+function ensureSoulsDelegation(ul) {
+    if (_soulsDelegated) return;
+    _soulsDelegated = true;
+    ul.addEventListener('change', async (ev) => {
+        const chk = ev.target?.closest?.('input[data-soul]');
+        if (!chk || !_soulsToggleFn) return;
+        const soulName = chk.getAttribute('data-soul');
+        const val = chk.checked;
+        chk.disabled = true;
+        try { await _soulsToggleFn(soulName, val); } catch(e){ pushToast('fail', `Soul切换失败: ${e.message}`); chk.checked = !val; }
+        finally { chk.disabled = false; }
+    });
 }
 export function renderSoulsListSimple(items) {
     // for modal without toggle
@@ -73,6 +107,7 @@ export function renderSoulsListSimple(items) {
 export function renderEventsList(items, onDelete) {
     const ul = document.getElementById('arcextreme-events');
     if (!ul) return;
+    _eventsDeleteFn = onDelete || null;
     if (!items.length) {
         ul.innerHTML = '<li class="ax-empty"><i class="fa-solid fa-feather"></i> 暂无已记录事件<br><small style="opacity:.6">与 AI 聊天后会自动提炼事件</small></li>';
         return;
@@ -81,21 +116,27 @@ export function renderEventsList(items, onDelete) {
         .map((e) => {
             const bucket = escapeHtml(e.time_bucket || '—');
             const text = escapeHtml(e.event_text);
-            // souls 兼容：可能是数组（无数个）或旧单串/逗号串
-            let soulsArr = [];
+            // souls 兼容：可能是数组（无数个）或旧单串/逗号串；优先数组零解析
+            let soulsArr = null;
             if (Array.isArray(e.souls)) soulsArr = e.souls;
             else if (typeof e.souls === 'string' && e.souls.trim()) {
-                try {
-                    const parsed = JSON.parse(e.souls);
-                    soulsArr = Array.isArray(parsed) ? parsed : [e.souls];
-                } catch {
-                    soulsArr = e.souls.includes(',') ? e.souls.split(',').map(s=>s.trim()).filter(Boolean) : [e.souls];
+                const key = e.souls;
+                soulsArr = _soulsCache.get(key);
+                if (!soulsArr) {
+                    try {
+                        const parsed = JSON.parse(key);
+                        soulsArr = Array.isArray(parsed) ? parsed : [key];
+                    } catch {
+                        soulsArr = key.includes(',') ? key.split(',').map(s=>s.trim()).filter(Boolean) : [key];
+                    }
+                    if (_soulsCache.size > 200) _soulsCache.clear();
+                    _soulsCache.set(key, soulsArr);
                 }
             } else if (e.souls_str) {
                 soulsArr = String(e.souls_str).split(',').map(s=>s.trim()).filter(Boolean);
-            }
+            } else soulsArr = [];
             const soulsTags = soulsArr.length ? `<span class="ax-event__meta">${soulsArr.map(s=>`<span class="tag tag--soul" style="margin-right:4px"><i class="fa-solid fa-user-tag"></i> ${escapeHtml(s)}</span>`).join('')}</span>` : '';
-            const time = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
+            const time = e.timestamp ? _fmtDateTime(e.timestamp) : '';
             return `<li data-id="${e.id}">
                 <span class="tag">${bucket}</span>
                 <span class="ax-event__text">${text}${soulsTags}${time ? `<span class="ax-event__meta"><i class="fa-regular fa-clock"></i> ${escapeHtml(time)}</span>` : ''}</span>
@@ -103,11 +144,34 @@ export function renderEventsList(items, onDelete) {
             </li>`;
         })
         .join('');
-    ul.querySelectorAll('li .score').forEach((node) => {
-        node.addEventListener('click', () => {
-            const id = Number(node.closest('li')?.getAttribute('data-id'));
-            if (!Number.isNaN(id)) onDelete(id);
-        });
+    ensureEventsDelegation(ul);
+}
+const _soulsCache = new Map();
+const _dateTimeCache = new Map();
+function _fmtDateTime(ts) {
+    // 输出与原来 new Date(ts).toLocaleString() 逐字节一致，仅加有界缓存
+    const k = Number(ts);
+    if (Number.isFinite(k)) {
+        const hit = _dateTimeCache.get(k);
+        if (hit !== undefined) return hit;
+        let s = '';
+        try { s = new Date(ts).toLocaleString(); } catch { s = ''; }
+        if (_dateTimeCache.size > 300) _dateTimeCache.clear();
+        _dateTimeCache.set(k, s);
+        return s;
+    }
+    try { return new Date(ts).toLocaleString(); } catch { return ''; }
+}
+let _eventsDeleteFn = null;
+let _eventsDelegated = false;
+function ensureEventsDelegation(ul) {
+    if (_eventsDelegated) return;
+    _eventsDelegated = true;
+    ul.addEventListener('click', (ev) => {
+        const node = ev.target?.closest?.('li .score');
+        if (!node || !_eventsDeleteFn) return;
+        const id = Number(node.closest('li')?.getAttribute('data-id'));
+        if (!Number.isNaN(id)) _eventsDeleteFn(id);
     });
 }
 
@@ -125,7 +189,21 @@ export function pushToast(kind, msg) {
 }
 
 // ---------- Trace 渲染（动态加载，失败则静默） ----------
-function fmtTime(ts) { try { return new Date(ts).toLocaleTimeString(); } catch { return ''; } }
+const _fmtTimeCache = new Map();
+function fmtTime(ts) {
+    // 输出与原来 new Date(ts).toLocaleTimeString() 逐字节一致，仅加有界缓存省重复ICU
+    const k = Number(ts);
+    if (Number.isFinite(k)) {
+        const hit = _fmtTimeCache.get(k);
+        if (hit !== undefined) return hit;
+        let s = '';
+        try { s = new Date(ts).toLocaleTimeString(); } catch { s = ''; }
+        if (_fmtTimeCache.size > 200) _fmtTimeCache.clear();
+        _fmtTimeCache.set(k, s);
+        return s;
+    }
+    try { return new Date(ts).toLocaleTimeString(); } catch { return ''; }
+}
 function stepIcon(step) {
     if (step === 'extract') return 'fa-wand-magic-sparkles';
     if (step === 'route') return 'fa-route';
@@ -157,6 +235,60 @@ let _tracePage = 1;
 // 手动展开的条目 id：renderTraceList 每次重绘整表（每步 LLM begin/finish 都触发），需保留否则一点开就被冲掉
 const _openTraceIds = new Set();
 const TRACE_PAGE_SIZE = 12;
+// A13省内存/省大核：pretty缓存+节流渲染，避免45并发时90次全量JSON美化唤醒大核
+const _prettyCache = new Map();
+const FENCE_RE_UI = /```(?:json)?\s*([\s\S]*?)```/i;
+const BRACKET_RE_UI = /[[{]/;
+function prettyTraceRaw(e) {
+    const key = e.id;
+    const raw = e.raw || '';
+    const hit = _prettyCache.get(key);
+    if (hit && hit.raw === raw) return hit.pretty;
+    let pretty = raw.slice(0, 6000);
+    if (pretty) {
+        try { pretty = JSON.stringify(JSON.parse(pretty), null, 2).slice(0, 9000); }
+        catch {
+            try {
+                const fence = pretty.match(FENCE_RE_UI);
+                const cand = (fence ? fence[1] : pretty).trim();
+                const sIdx = cand.search(BRACKET_RE_UI);
+                const eIdx = cand.trim().startsWith('[') ? cand.lastIndexOf(']') : cand.lastIndexOf('}');
+                if (sIdx >= 0 && eIdx > sIdx) pretty = JSON.stringify(JSON.parse(cand.slice(sIdx, eIdx + 1)), null, 2).slice(0, 9000);
+            } catch {}
+        }
+    }
+    if (_prettyCache.size > 60) _prettyCache.clear();
+    _prettyCache.set(key, { raw, pretty });
+    return pretty;
+}
+let _traceDelegated = false;
+function ensureTraceDelegation(ul) {
+    if (_traceDelegated) return;
+    _traceDelegated = true;
+    ul.addEventListener('click', async (ev) => {
+        const copyBtn = ev.target?.closest?.('.ax-copy');
+        if (copyBtn) {
+            ev.stopPropagation();
+            const id = Number(copyBtn.getAttribute('data-copy'));
+            const mod = await getTraceMod();
+            const store = mod ? mod.traceStore : [];
+            let ent = null;
+            for (let i = 0; i < store.length; i++) if (store[i].id === id) { ent = store[i]; break; }
+            if (!ent) return;
+            try { await navigator.clipboard.writeText(ent.raw || ent.error || ''); pushToast('ok','已复制'); } catch { pushToast('fail','复制失败'); }
+            return;
+        }
+        const head = ev.target?.closest?.('.ax-trace__head');
+        if (head) {
+            const li = head.closest('.ax-trace__item');
+            if (!li) return;
+            li.classList.toggle('is-open');
+            const id = Number(li.getAttribute('data-id'));
+            if (li.classList.contains('is-open')) _openTraceIds.add(id);
+            else _openTraceIds.delete(id);
+        }
+    });
+}
 export async function renderTraceList(entries) {
     const ul = document.getElementById('arcextreme-trace');
     const empty = document.getElementById('arcextreme-trace-empty');
@@ -278,7 +410,7 @@ export async function renderTraceList(entries) {
         for(const g of groupedForHeader){
             const inPage=g.filter(x=>pageSet.has(x.id));
             if(inPage.length){
-                const headerTs=new Date(g[0].ts).toLocaleTimeString();
+                const headerTs=fmtTime(g[0].ts);
                 const ok=g.filter(x=>x.status==='ok').length, fail=g.filter(x=>x.status==='fail').length;
                 htmlParts.push(`<li class="ax-trace__batchhead"><i class="fa-solid fa-layer-group"></i> SubAgent 批次 ${headerTs} · ${g.length}条 <span class="ax-trace__batchcount">${ok}✓ ${fail?fail+'✗':''}</span></li>`);
                 for(const e of inPage){
@@ -288,21 +420,7 @@ export async function renderTraceList(entries) {
         }
     }
     ul.innerHTML = (htmlParts.join('') || '') + pageSlice.map(e => {
-        const rawText = (e.raw || '').slice(0, 6000);
-        // JSON 格式化后再展示：压缩单行改多行缩进，失败则原文照显
-        let rawPretty = rawText;
-        if (rawText) {
-            try { rawPretty = JSON.stringify(JSON.parse(rawText), null, 2).slice(0, 9000); }
-            catch {
-                try {
-                    const fence = rawText.match(/```(?:json)?\s*([\s\S]*?)```/i);
-                    const cand = (fence ? fence[1] : rawText).trim();
-                    const sIdx = cand.search(/[[{]/);
-                    const eIdx = cand.trim().startsWith('[') ? cand.lastIndexOf(']') : cand.lastIndexOf('}');
-                    if (sIdx >= 0 && eIdx > sIdx) rawPretty = JSON.stringify(JSON.parse(cand.slice(sIdx, eIdx + 1)), null, 2).slice(0, 9000);
-                } catch {}
-            }
-        }
+        const rawPretty = prettyTraceRaw(e);
         const rawEsc = escapeHtml(rawPretty);
         const errEsc = escapeHtml(e.error || '');
         const modelEsc = escapeHtml(e.model || '—');
@@ -335,30 +453,10 @@ export async function renderTraceList(entries) {
         </li>`;
     }).join('');
 
-    ul.querySelectorAll('.ax-trace__head').forEach(head => {
-        head.addEventListener('click', () => {
-            const li = head.closest('.ax-trace__item');
-            li.classList.toggle('is-open');
-            const id = Number(li.getAttribute('data-id'));
-            if (li.classList.contains('is-open')) _openTraceIds.add(id);
-            else _openTraceIds.delete(id);
-        });
-    });
+    ensureTraceDelegation(ul);
     // 重绘会丢 is-open（innerHTML 全量重建），把手动展开的恢复
     ul.querySelectorAll('.ax-trace__item').forEach(li => {
         if (_openTraceIds.has(Number(li.getAttribute('data-id')))) li.classList.add('is-open');
-    });
-    // 复制需拿到 traceStore
-    const mod = await getTraceMod();
-    const store = mod ? mod.traceStore : [];
-    ul.querySelectorAll('.ax-copy').forEach(btn => {
-        btn.addEventListener('click', async (ev) => {
-            ev.stopPropagation();
-            const id = Number(btn.getAttribute('data-copy'));
-            const ent = store.find(x=>x.id===id);
-            if (!ent) return;
-            try { await navigator.clipboard.writeText(ent.raw || ent.error || ''); pushToast('ok','已复制'); } catch { pushToast('fail','复制失败'); }
-        });
     });
 }
 
@@ -372,7 +470,7 @@ export async function initTraceUI() {
         const ul = document.getElementById('arcextreme-trace');
         if (!ul) return;
         mod.onTrace((entries) => renderTraceList(entries));
-        renderTraceList([...mod.traceStore]);
+        renderTraceList(mod.traceStore);
 
         const clearBtn = document.getElementById('arcextreme-trace-clear');
         if (clearBtn) clearBtn.addEventListener('click', () => { try { mod.clearTrace(); _tracePage=1; } catch {} log('已清空调用轨迹'); });
@@ -383,7 +481,7 @@ export async function initTraceUI() {
                 f.classList.add('is-active');
                 _traceFilter=f.getAttribute('data-filter')||'all';
                 _tracePage=1;
-                renderTraceList([...mod.traceStore]);
+                renderTraceList(mod.traceStore);
             });
         });
         const collapseBtn=document.getElementById('arcextreme-trace-collapse-all');
@@ -391,7 +489,7 @@ export async function initTraceUI() {
         const expandBtn=document.getElementById('arcextreme-trace-expand-all2');
         if(expandBtn) expandBtn.addEventListener('click', ()=>{ document.querySelectorAll('.ax-trace__item').forEach(li=> { li.classList.add('is-open'); _openTraceIds.add(Number(li.getAttribute('data-id'))); }); });
         const autoChk=document.getElementById('arcextreme-trace-autocollapse');
-        if(autoChk) autoChk.addEventListener('change', ()=>{ _traceAutoCollapse=autoChk.checked; renderTraceList([...mod.traceStore]); });
+        if(autoChk) autoChk.addEventListener('change', ()=>{ _traceAutoCollapse=autoChk.checked; renderTraceList(mod.traceStore); });
         // 分页点击由外部控制：简单上下页
         const pagingEl=document.getElementById('arcextreme-trace-paging');
         if(pagingEl){
@@ -405,13 +503,24 @@ export async function initTraceUI() {
                 const total = mod.traceStore.length;
                 const pages = Math.max(1, Math.ceil(total/TRACE_PAGE_SIZE));
                 _tracePage = _tracePage % pages +1;
-                renderTraceList([...mod.traceStore]);
+                renderTraceList(mod.traceStore);
             });
         }
-        // 滚轮分页
+        // 滚轮分页：rAF节流，避免快速滚动连续全量重绘唤醒大核
+        let _wheelQueued = false;
         ul.addEventListener('wheel', (e)=>{
-            if(e.deltaY>30 && _tracePage < Math.ceil(mod.traceStore.length/TRACE_PAGE_SIZE)) { _tracePage++; renderTraceList([...mod.traceStore]); }
-            else if(e.deltaY<-30 && _tracePage>1) { _tracePage--; renderTraceList([...mod.traceStore]); }
+            if (_wheelQueued) return;
+            const dir = e.deltaY > 30 ? 1 : (e.deltaY < -30 ? -1 : 0);
+            if (!dir) return;
+            const pages = Math.max(1, Math.ceil(mod.traceStore.length / TRACE_PAGE_SIZE));
+            const next = _tracePage + dir;
+            if (next < 1 || next > pages) return;
+            _wheelQueued = true;
+            requestAnimationFrame(() => {
+                _wheelQueued = false;
+                _tracePage = next;
+                renderTraceList(mod.traceStore);
+            });
         }, {passive:true});
 
         const pipeline = document.getElementById('arcextreme-pipeline');

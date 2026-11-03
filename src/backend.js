@@ -1,33 +1,10 @@
 // 与后端 REST 通信的封装
 
 import { SETTINGS_KEY } from './config.js';
+import { getBackendBase as _sharedBackendBase } from './backendUrl.js';
 
-function resolveBackendUrl(raw) {
-    let u = String(raw || '').trim();
-    if (!u) u = 'http://127.0.0.1:9001';
-    u = u.replace(/\/+$/, '');
-    // 局域网自动兼容：本机 127.0.0.1 在别的机器上会连到自己，自动替换为当前页面 host
-    try {
-        const pageHost = window.location.hostname;
-        // 当后端未配置或为回环时，默认用页面 host:9001 更通用（纯本机访问仍可用 127.0.0.1）
-        if (!raw || raw.trim() === '') {
-            if (pageHost && pageHost !== '' && pageHost !== '127.0.0.1' && pageHost !== 'localhost') {
-                return `http://${pageHost}:9001`;
-            }
-            return u;
-        }
-        const backendHost = new URL(u).hostname;
-        if ((backendHost === '127.0.0.1' || backendHost === 'localhost') && pageHost && pageHost !== '127.0.0.1' && pageHost !== 'localhost' && pageHost !== '') {
-            const fixed = u.replace(backendHost, pageHost);
-            console.warn(`[ArcEXtreme] 后端地址局域网自动修正：${u} -> ${fixed}`);
-            return fixed;
-        }
-    } catch {}
-    return u;
-}
 function baseUrl() {
-    const s = window.extension_settings?.[SETTINGS_KEY];
-    return resolveBackendUrl(s?.backendUrl);
+    return _sharedBackendBase();
 }
 // 供 UI 显示实际生效地址
 export function getEffectiveBackendUrl() { return baseUrl(); }

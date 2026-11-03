@@ -1,30 +1,9 @@
 // Rerank：走后端代理根治 CORS，有后端的插件就要狠狠依赖后端
-import { SETTINGS_KEY } from './config.js';
+import { getBackendBase } from './backendUrl.js';
 
-function getBackendBase() {
-    try {
-        let raw = window.extension_settings?.[SETTINGS_KEY]?.backendUrl;
-        let u = String(raw || '').trim();
-        if (!u) {
-            const pageHost = window.location.hostname;
-            if (pageHost && pageHost !== '' && pageHost !== '127.0.0.1' && pageHost !== 'localhost') {
-                return `http://${pageHost}:9001`;
-            }
-            return 'http://127.0.0.1:9001';
-        }
-        u = u.replace(/\/+$/, '');
-        try {
-            const pageHost = window.location.hostname;
-            const backendHost = new URL(u).hostname;
-            if ((backendHost === '127.0.0.1' || backendHost === 'localhost') && pageHost && pageHost !== '127.0.0.1' && pageHost !== 'localhost' && pageHost !== '') {
-                const fixed = u.replace(backendHost, pageHost);
-                console.warn(`[ArcEXtreme] 后端地址自动修正：${u} -> ${fixed}`);
-                return fixed;
-            }
-        } catch {}
-        return u;
-    } catch { return 'http://127.0.0.1:9001'; }
-}
+const SID_BAD_RE_RR = /[^A-Za-z0-9_-]/g;
+let _rrChatId = null;
+let _rrSid = null;
 
 function isMissingSessionError(text) {
     const lower = String(text || '').toLowerCase();
@@ -78,8 +57,12 @@ export async function rerank(cfg, query, documents) {
         const ctx = window.SillyTavern?.getContext?.() || null;
         const chatId = ctx?.chatId;
         if (chatId) {
-            const s = String(chatId).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
-            session_id = s ? (s.startsWith('arcextreme-') ? s : `arcextreme-${s}`) : null;
+            if (chatId === _rrChatId && _rrSid) session_id = _rrSid;
+            else {
+                const s = String(chatId).replace(SID_BAD_RE_RR, '_').slice(0, 64);
+                session_id = s ? (s.startsWith('arcextreme-') ? s : `arcextreme-${s}`) : null;
+                if (session_id) { _rrChatId = chatId; _rrSid = session_id; }
+            }
         }
     } catch {}
     if (!session_id) {

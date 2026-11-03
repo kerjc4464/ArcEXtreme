@@ -2,10 +2,24 @@
 import { chatCompletion, parseJson } from './llm.js';
 import { DEFAULT_SUBAGENT_SYS, DEFAULT_SUBAGENT_USER, renderPrompt, translateCounter, COUNTER_ATTITUDES, COUNTER_LABELS } from './config.js';
 
+const NL_RE = /\n/g;
+
 function chunk(arr, n){
     const out=[];
     for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n));
     return out;
+}
+function getSnippets(soulsContentMap, soulsInBatch) {
+    // 每soul只slice+replace一次，三处复用
+    const m1200 = new Map();
+    const m300 = new Map();
+    for (const k of soulsInBatch) {
+        const raw = String(soulsContentMap[k] || '');
+        const s12 = raw.slice(0, 1200);
+        m1200.set(k, s12);
+        m300.set(k, s12.slice(0, 300).replace(NL_RE, ' '));
+    }
+    return { m1200, m300 };
 }
 function groupBySoul(items){
     const g={};
@@ -23,27 +37,27 @@ async function callSubAgentBatch(settings, batchItems, soulsContentMap, contextT
     const sysTpl = settings.prompts?.subAgentSys || DEFAULT_SUBAGENT_SYS;
     const userTpl = settings.prompts?.subAgentUser || DEFAULT_SUBAGENT_USER;
 
+    const soulsInBatch = [...new Set(batchItems.map(x=>x.soul))];
+    const { m1200, m300 } = getSnippets(soulsContentMap, soulsInBatch);
     const eventsDesc = batchItems.map((it, idx)=>{
-        const soulContent = (soulsContentMap[it.soul] || '').slice(0, 1200);
         const label = COUNTER_LABELS[it.counter] || String(it.counter);
         const att = COUNTER_ATTITUDES[it.counter] || translateCounter(it.counter);
-        return `#${idx} soul=${it.soul} counter=${it.counter}(${label}/${att}) event="${String(it.event_text||it.event||'').slice(0,200)}" soulContent="${soulContent.slice(0,300).replace(/\n/g,' ')}"`;
+        return `#${idx} soul=${it.soul} counter=${it.counter}(${label}/${att}) event="${String(it.event_text||it.event||'').slice(0,200)}" soulContent="${m300.get(it.soul) || ''}"`;
     }).join('\n');
 
-    let sys = renderPrompt(sysTpl, { counter: 'batch', counterLabel: '批量', attitude: '', soul: batchItems[0]?.soul||'batch', event: `批量${batchItems.length}条`, soulSnippet: (soulsContentMap[batchItems[0]?.soul]||'').slice(0,1200), soulContent: (soulsContentMap[batchItems[0]?.soul]||'').slice(0,1200) });
+    let sys = renderPrompt(sysTpl, { counter: 'batch', counterLabel: '批量', attitude: '', soul: batchItems[0]?.soul||'batch', event: `批量${batchItems.length}条`, soulSnippet: m1200.get(batchItems[0]?.soul) || '', soulContent: m1200.get(batchItems[0]?.soul) || '' });
     // 角色隔离提示：若batch内同魂，则强调单角色
-    const soulsInBatch = [...new Set(batchItems.map(x=>x.soul))];
     const isoNote = soulsInBatch.length===1 ? `\n[角色隔离] 本次仅裁判 soul=${soulsInBatch[0]} 的 ${batchItems.length} 条短期记忆，禁止跨角色串扰。` : `\n[批量模式] 你将一次性收到 ${batchItems.length} 个事件，每个需独立判断。`;
     sys = sys + isoNote + `\n只输出 JSON：{"results":[{"id":0,"action":"+1"|"-1"|"Skip","reason":"..."}, ...]}`;
     if (!sys.includes('results')) sys += `\n只输出 JSON：{"results":[{"id":0,"action":"+1"|"-1"|"Skip"}]}`;
 
     const renderedPerEvent = batchItems.map((it, idx)=>{
-        const snippet = String(soulsContentMap[it.soul]||'').slice(0,1200);
+        const snippet = m1200.get(it.soul) || '';
         const label = COUNTER_LABELS[it.counter] || String(it.counter);
         const att = COUNTER_ATTITUDES[it.counter] || translateCounter(it.counter);
         const vars = { soul: it.soul, event: it.event_text||it.event||'', counter: String(it.counter), counterLabel: label, attitude: att, soulSnippet: snippet, soulContent: snippet, context: contextText||'', userMessage: it.userMessage||'' };
         const tplRendered = renderPrompt(userTpl, vars);
-        return `#${idx} ${tplRendered.slice(0,600).replace(/\n/g,' | ')}`;
+        return `#${idx} ${tplRendered.slice(0,600).replace(NL_RE,' | ')}`;
     }).join('\n');
 
     const soulBlocks = soulsInBatch.map(k=> `=== ${k} ===\n${String(soulsContentMap[k]||'').slice(0, settings.shortPool?.subAgentMode==='perEvent'? 4000 : 1200)}`).join('\n\n');

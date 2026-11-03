@@ -1,7 +1,13 @@
 // 通用 OpenAI 兼容 chat/completions 调用 — 走后端代理根治 CORS，支持温度/推理兼容降级
 // 有后端的插件就要狠狠依赖后端：优先走 backend /api/llm_proxy，失败才直连
 
-import { SETTINGS_KEY } from './config.js';
+import { getBackendBase } from './backendUrl.js';
+
+const THINK_RE = /<think>[\s\S]*?<\/think>/gi;
+const FENCE_RE = /```(?:json)?\s*([\s\S]*?)```/i;
+const SID_BAD_RE = /[^A-Za-z0-9_-]/g;
+const SID_SUFFIX_BAD_RE = /[^A-Za-z0-9_-]/g;
+const HASH_CHAT_RE = /chat[_-]?id=([^&]+)/i;
 
 let _traceMod = null;
 async function getTrace() {
@@ -23,16 +29,18 @@ function getTraceSync() {
 function sanitizeSessionId(raw) {
     let s = String(raw || '').trim();
     if (!s) return '';
-    s = s.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+    s = s.replace(SID_BAD_RE, '_').slice(0, 64);
     if (!s) return '';
     if (!s.startsWith('arcextreme-')) s = `arcextreme-${s}`;
     return s.slice(0, 80);
 }
 function getBrowserFallbackSessionId() {
+    if (_browserFallbackCached) return _browserFallbackCached;
     const KEY = 'arcextreme_opencode_session';
     try {
         const old = localStorage.getItem(KEY);
-        if (old && sanitizeSessionId(old)) return sanitizeSessionId(old);
+        const s2 = old && sanitizeSessionId(old);
+        if (s2) { _browserFallbackCached = s2; return s2; }
     } catch {}
     const hex = (() => {
         try {
@@ -44,13 +52,17 @@ function getBrowserFallbackSessionId() {
     })();
     const sid = `arcextreme-${hex}`;
     try { localStorage.setItem(KEY, sid); } catch {}
+    _browserFallbackCached = sid;
     return sid;
 }
 export function bgSessionId(chatId, kind) {
     const base = sanitizeSessionId(chatId) || getBrowserFallbackSessionId();
-    const suffix = `-bg-${String(kind || 'bg').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 12)}`;
+    const suffix = `-bg-${String(kind || 'bg').replace(SID_SUFFIX_BAD_RE, '').slice(0, 12)}`;
     return (base + suffix).slice(0, 80);
 }
+let _sessChatId = null;
+let _sessCached = null;
+let _browserFallbackCached = null;
 function resolveOpencodeSessionId(opts = {}) {
     const explicit = opts.session_id ?? opts.sessionId ?? opts.opencodeSessionId;
     if (explicit && sanitizeSessionId(explicit)) return sanitizeSessionId(explicit);
@@ -58,43 +70,27 @@ function resolveOpencodeSessionId(opts = {}) {
     try {
         const ctx = window.SillyTavern?.getContext?.() || null;
         const chatId = ctx?.chatId;
-        if (chatId && sanitizeSessionId(chatId)) return sanitizeSessionId(chatId);
+        if (chatId) {
+            if (chatId === _sessChatId && _sessCached) return _sessCached;
+            const sid = sanitizeSessionId(chatId);
+            if (sid) { _sessChatId = chatId; _sessCached = sid; return sid; }
+        }
     } catch {}
     try {
-        const m = String(window.location.hash || '').match(/chat[_-]?id=([^&]+)/i);
-        if (m && m[1] && sanitizeSessionId(decodeURIComponent(m[1]))) return sanitizeSessionId(decodeURIComponent(m[1]));
+        const m = String(window.location.hash || '').match(HASH_CHAT_RE);
+        if (m && m[1]) {
+            const dec = decodeURIComponent(m[1]);
+            if (dec) {
+                const sid2 = sanitizeSessionId(dec);
+                if (sid2) return sid2;
+            }
+        }
     } catch {}
     return getBrowserFallbackSessionId();
 }
 function isMissingSessionError(text) {
     const lower = String(text || '').toLowerCase();
     return lower.includes('missingsessionid') || lower.includes('x-opencode-session');
-}
-
-function getBackendBase() {
-    try {
-        const s = window.extension_settings?.[SETTINGS_KEY];
-        let raw = s?.backendUrl ?? localStorage.getItem('arcextreme_backend');
-        let u = String(raw || '').trim();
-        if (!u) {
-            const pageHost = window.location.hostname;
-            if (pageHost && pageHost !== '' && pageHost !== '127.0.0.1' && pageHost !== 'localhost') {
-                return `http://${pageHost}:9001`;
-            }
-            return 'http://127.0.0.1:9001';
-        }
-        u = u.replace(/\/+$/, '');
-        try {
-            const pageHost = window.location.hostname;
-            const backendHost = new URL(u).hostname;
-            if ((backendHost === '127.0.0.1' || backendHost === 'localhost') && pageHost && pageHost !== '127.0.0.1' && pageHost !== 'localhost' && pageHost !== '') {
-                const fixed = u.replace(backendHost, pageHost);
-                console.warn(`[ArcEXtreme] 后端地址自动修正：${u} -> ${fixed}（页面 ${pageHost}）`);
-                return fixed;
-            }
-        } catch {}
-        return u;
-    } catch { return 'http://127.0.0.1:9001'; }
 }
 
 /**
@@ -312,10 +308,8 @@ export async function chatCompletion(cfg, messages, opts = {}) {
         if (traceId) {
             try {
                 const tm = traceMod || getTraceSync();
-                let parsed = null;
-                try { parsed = JSON.parse(out.replace(/<think>[\s\S]*?<\/think>/gi, '').match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] ?? out); } catch {}
-                const p2 = (() => { try { return JSON.parse(out); } catch { return null; } })();
-                tm.finishTraceOk(traceId, out, parsed || p2);
+                const parsed = parseJson(out);
+                tm.finishTraceOk(traceId, out, parsed);
             } catch {}
         }
         if (!content && choice?.message?.reasoning_content) return String(choice.message.reasoning_content);
@@ -339,13 +333,20 @@ export async function chatCompletion(cfg, messages, opts = {}) {
 }
 
 // 从模型输出中稳健解析 JSON（兼容 ```json 代码块 + 推理思考前缀）
+const BRACKET_RE = /[[{]/;
 export function parseJson(text) {
     if (typeof text !== 'string') return null;
     let t = text.trim();
-    t = t.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-    const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (fence) t = fence[1].trim();
-    const start = t.search(/[[{]/);
+    if (!t) return null;
+    // A13省单核：短路无think/无fence时跳过正则（大小写不敏感判断，与原来/gi语义一致）
+    if (t.search(/<think/i) >= 0) { THINK_RE.lastIndex = 0; t = t.replace(THINK_RE, '').trim(); }
+    if (t.includes('```')) {
+        FENCE_RE.lastIndex = 0;
+        const fence = t.match(FENCE_RE);
+        if (fence) t = fence[1].trim();
+    }
+    const start = t.search(BRACKET_RE);
+    if (start < 0) { try { return JSON.parse(t); } catch { return null; } }
     const endChar = t.trim().startsWith('[') ? ']' : '}';
     const end = t.lastIndexOf(endChar);
     if (start >= 0 && end > start) t = t.slice(start, end + 1);
