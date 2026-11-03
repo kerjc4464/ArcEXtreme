@@ -1,4 +1,5 @@
 @echo off
+title ArcEXtreme Backend
 cd /d "%~dp0"
 chcp 65001 >nul 2>&1
 set PYTHONIOENCODING=utf-8
