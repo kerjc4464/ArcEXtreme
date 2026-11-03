@@ -3,7 +3,7 @@ import { chatCompletion, parseJson } from './llm.js';
 import { DEFAULT_SUBLIMATE_SYS, DEFAULT_SUBLIMATE_USER, renderPrompt, translateCounter, COUNTER_LABELS } from './config.js';
 import { backend } from './backend.js';
 
-export async function sublimateOne(settings, item, soulContent, contextText) {
+export async function sublimateOne(settings, item, soulContent, contextText, sessionId = null) {
     let cfg = settings.sublimationLLM?.useExtract ? settings.extractLLM : settings.sublimationLLM;
     if ((!cfg || !cfg.apiUrl) && settings.extractLLM?.apiUrl) cfg = settings.extractLLM;
     if (!cfg || !cfg.apiUrl) throw new Error('升华LLM未配置（请在升华面板填BaseURL或勾选“复用提取”）');
@@ -40,14 +40,14 @@ export async function sublimateOne(settings, item, soulContent, contextText) {
     const raw = await chatCompletion(cfg, [
         { role:'system', content: sys },
         { role:'user', content: user },
-    ], { json:true, _traceStep:'sublimate', _traceLabel:`升华:${item.soul}#${item.event_id}` });
+    ], { json:true, _traceStep:'sublimate', _traceLabel:`升华:${item.soul}#${item.event_id}`, ...(sessionId ? { session_id: sessionId } : {}) });
     const parsed = parseJson(raw) || {};
     const content = String(parsed.sublimated || parsed.content || parsed.text || raw).trim().slice(0, 2000);
     const title = String(parsed.title || `升华记忆 · ${item.soul} · ${label}`).trim().slice(0,80);
     return { content, title, raw };
 }
 
-export async function checkAndSublimate(settings, chatId, contextText, soulsContentMap) {
+export async function checkAndSublimate(settings, chatId, contextText, soulsContentMap, sessionId = null) {
     if (!settings.sublimation?.enabled) return [];
     const thr = Number(settings.shortPool?.stuckThreshold||8);
     let candidates=[];
@@ -59,7 +59,7 @@ export async function checkAndSublimate(settings, chatId, contextText, soulsCont
     for(const c of candidates.slice(0, 5)) { // 每轮最多5条防风暴
         try {
             const soulContent = soulsContentMap[c.soul] || '';
-            const sub = await sublimateOne(settings, c, soulContent, contextText);
+            const sub = await sublimateOne(settings, c, soulContent, contextText, sessionId);
             // append to soul file: need filename
             // soul文件名通过 listSouls 映射 name->filename
             let filename=null;

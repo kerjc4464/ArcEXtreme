@@ -46,6 +46,11 @@ function getBrowserFallbackSessionId() {
     try { localStorage.setItem(KEY, sid); } catch {}
     return sid;
 }
+export function bgSessionId(chatId, kind) {
+    const base = sanitizeSessionId(chatId) || getBrowserFallbackSessionId();
+    const suffix = `-bg-${String(kind || 'bg').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 12)}`;
+    return (base + suffix).slice(0, 80);
+}
 function resolveOpencodeSessionId(opts = {}) {
     const explicit = opts.session_id ?? opts.sessionId ?? opts.opencodeSessionId;
     if (explicit && sanitizeSessionId(explicit)) return sanitizeSessionId(explicit);

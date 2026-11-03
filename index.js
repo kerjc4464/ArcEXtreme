@@ -32,6 +32,7 @@ import {
 import { log, renderSoulsList, renderEventsList, setStatus, initTraceUI, pushToast } from './src/ui.js';
 import { evaluateShortPool } from './src/subAgents.js';
 import { checkAndSublimate } from './src/sublimation.js';
+import { bgSessionId } from './src/llm.js';
 
 const toastr = window.toastr;
 
@@ -391,9 +392,13 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
     lastQueryChatId = cdChatId;
     lastQueryTs = now;
 
+    // 高速模式后台排队：注入后才启动，catch 也能释放占位
+    let bgTakenKinds = [];
+    let bgChatForRelease = '';
     try {
         const ctx = getContext();
         const chatId = ctx.chatId || getCurrentChatId();
+        bgChatForRelease = chatId;
         if (!isValidChatId(chatId)) {
             if (s.debug) log(`生成拦截：chatId 无效(${chatId})，跳过`);
             try{ clearInjection(s); }catch{}
@@ -488,6 +493,10 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         }
 
         // ---- 快路径：清理同步 + 路由/Embedding限时；池裁判丢后台（最终一致，下轮生效） ----
+        // 高速模式：后台任务只排队、注入后才真正启动，零抢前台路由/检索的连接与 session
+        const pendingBg = [];
+        const bgTakenHere = new Set();
+        const trackBgTake = (k) => { bgTakenHere.add(k); try { bgTakenKinds = [...bgTakenHere]; } catch {} };
         let vacanciesTotal = 0;
         let freedInfo = null;
         let buckets = [];
@@ -536,7 +545,8 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 log(`[SubAgent同步]失败，本轮用快照继续: ${e.message}`);
                 notify('SubAgent裁判', false, `${e.message}(已用快照继续)`);
             }
-        } else if (shortPoolItems.length && !fastExpired() && bgTake(chatId, 'pool')) {
+        } else if (!isFull && shortPoolItems.length && !fastExpired() && bgTake(chatId, 'pool')) {
+            trackBgTake('pool');
             const poolSnap = shortPoolItems.map(it=> ({
                 event_id: it.id,
                 soul: it.pool_soul || it.state_soul || it.soul,
@@ -551,10 +561,12 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
             if (poolSnap.length) {
                 const effCfgBg = s.subAgentLLM?.useExtract ? s.extractLLM : s.subAgentLLM;
                 const effBg = (effCfgBg && effCfgBg.apiUrl) ? effCfgBg : (s.extractLLM?.apiUrl ? s.extractLLM : null);
-                log(`[SubAgent后台] 启动 池${poolSnap.length}条 (模型 ${effBg?.model||'—'})`);
-                notify('SubAgent裁判', null, `${poolSnap.length} 事件后台裁判中…不阻塞聊天`);
-                launchBackground((async () => {
-                    const evaluations = await evaluateShortPool(s, poolSnap, soulMapSnap, ctxSnap, userSnap);
+                // 高速模式：只排队不启动，注入后 flush，彻底不抢前台路由/检索
+                const bgSidPool = bgSessionId(chatSnap, 'pool');
+                log(`[SubAgent后台] 排队 池${poolSnap.length}条 (模型 ${effBg?.model||'—'})，注入后启动`);
+                notify('SubAgent裁判', null, `${poolSnap.length} 事件已排队，注入后后台裁判…不阻塞聊天`);
+                pendingBg.push(() => launchBackground((async () => {
+                    const evaluations = await evaluateShortPool(s, poolSnap, soulMapSnap, ctxSnap, userSnap, bgSidPool);
                     if (evaluations.length) {
                         let syncRes = null;
                         try {
@@ -568,9 +580,11 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                         notify('SubAgent裁判', true, `${cnt} 已更新(后台)`);
                         if (s.debug) { try { refreshShortPool(); if(isDataModalOpen()){ refreshModalShortPool(); } } catch {} }
                     }
-                })(), '[SubAgent后台]', () => { bgRelease(chatSnap, 'pool'); });
+                })(), '[SubAgent后台]', () => { bgRelease(chatSnap, 'pool'); }));
             } else {
                 bgRelease(chatId, 'pool');
+                bgTakenHere.delete('pool');
+                try { bgTakenKinds = [...bgTakenHere]; } catch {}
             }
         } else if (shortPoolItems.length && bgBusy(chatId, 'pool')) {
             log('SubAgent后台裁判进行中，本轮跳过（防堆积）');
@@ -797,7 +811,8 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                         log(`[SubAgent检索同步]失败，本轮用快照继续: ${e.message}`);
                         notify('SubAgent裁判(检索)', false, `${e.message}(已用快照继续)`);
                     }
-                } else if (raEnabled && retrieved.length && bgTake(chatId, 'a1')) {
+                } else if (!isFull && raEnabled && retrieved.length && bgTake(chatId, 'a1')) {
+                    trackBgTake('a1');
                     const retrievedSnap = retrieved.slice();
                     const fillerSnap = fillerEvents.slice();
                     const tradSnap = traditionalRetrieved.slice();
@@ -808,8 +823,9 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                     const maxKSnap = Math.max(1, Math.min(20, Number(raCfg?.maxItems ?? 10)));
                     const includeTradSnap = raCfg?.includeTraditional !== false;
                     const soulsSelSnap = soulsSel.slice();
-                    notify('SubAgent裁判(检索)', null, `${Math.min(retrievedSnap.length, maxKSnap)} 条检索结果后台裁判中…不阻塞聊天`);
-                    launchBackground((async () => {
+                    const bgSidA1 = bgSessionId(chatSnapA1, 'a1');
+                    notify('SubAgent裁判(检索)', null, `${Math.min(retrievedSnap.length, maxKSnap)} 条检索结果已排队，注入后后台裁判…不阻塞聊天`);
+                    pendingBg.push(() => launchBackground((async () => {
                         const maxK = maxKSnap;
                         const includeTrad = includeTradSnap;
                         let candEvents = [];
@@ -885,7 +901,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                         }
                         for (const n of needSouls) if (soulMapSnapA1[n]) localSoulMap[n]=soulMapSnapA1[n];
                         if (!Object.keys(localSoulMap).length) { log('[SubAgent检索后台]跳过：无可用soul原文，下轮重试'); return; }
-                        const eval2 = await evaluateShortPool(s, evalItems, localSoulMap, ctxSnapA1, userSnapA1);
+                        const eval2 = await evaluateShortPool(s, evalItems, localSoulMap, ctxSnapA1, userSnapA1, bgSidA1);
                         if (eval2.length) {
                             const hasReal = eval2.some(e=> e.action !== 'Skip');
                             let syncRes2 = null;
@@ -901,7 +917,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                             notify('SubAgent裁判(检索)', true, `${cnt2} 已更新(后台)${hasReal?'':'(全Skip)'}`);
                             if (s.debug) { try { refreshShortPool(); if(isDataModalOpen()){ refreshModalShortPool(); } } catch {} }
                         }
-                    })(), '[SubAgent检索后台]', () => { bgRelease(chatSnapA1, 'a1'); });
+                    })(), '[SubAgent检索后台]', () => { bgRelease(chatSnapA1, 'a1'); }));
                 } else if (raEnabled && retrieved.length && bgBusy(chatId, 'a1')) {
                     log('A1后台裁判进行中，本轮跳过（防堆积）');
                 }
@@ -1006,13 +1022,16 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 log(`[升华同步]失败，本轮跳过: ${e.message}`);
                 notify('升华', false, `${e.message}(已跳过)`);
             }
-        } else if (!fastExpired() && bgTake(chatId, 'sub')) {
+        } else if (!isFull && !fastExpired() && bgTake(chatId, 'sub')) {
+            trackBgTake('sub');
             const chatSnapSub = chatId, ctxSnapSub = contextTextSubAgent || contextText;
             const soulMapSnapSub = { ...unifiedSoulMap };
             const enabledSnapSub = new Set(enabledSetForStage);
             const enabledSoulsSnapSub = enabledSoulsForStage.slice();
             const capSnapSub = cap;
-            launchBackground((async () => {
+            const bgSidSub = bgSessionId(chatSnapSub, 'sub');
+            log('[升华后台] 已排队，注入后启动');
+            pendingBg.push(() => launchBackground((async () => {
                 setPipeline('sublimate');
                 const thr = Number(s.shortPool?.stuckThreshold || 8);
                 let preCandidates = [];
@@ -1035,7 +1054,7 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                 }
                 const mapForSub = Object.keys(soulsContentMap).length ? soulsContentMap : soulMapSnapSub;
                 if (!Object.keys(mapForSub).length) { log('[升华后台]跳过：无可用soul原文，不做无依据升华'); return; }
-                const subRes = await checkAndSublimate(s, chatSnapSub, ctxSnapSub, mapForSub);
+                const subRes = await checkAndSublimate(s, chatSnapSub, ctxSnapSub, mapForSub, bgSidSub);
                 if (subRes && subRes.length) {
                     log(`[升华后台]完成 ${subRes.length} 条: ${subRes.map(x=>`【${x.soul}】${x.sublimated.slice(0,30)}`).join(' | ')}`);
                     notify('升华', true, `${subRes.length} 条已固化到soul(后台)`);
@@ -1052,18 +1071,25 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
                     }
                     if (s.debug) { try { refreshSublimated(); if(isDataModalOpen()){ refreshModalSublimated(); } } catch {} }
                 }
-            })(), '[升华后台]', () => { bgRelease(chatSnapSub, 'sub'); });
+            })(), '[升华后台]', () => { bgRelease(chatSnapSub, 'sub'); }));
         } else if (bgBusy(chatId, 'sub')) {
             log('升华后台进行中，本轮跳过（防堆积）');
         }
 
         // Stage H：注入（高速模式慢任务已在后台追赶；全量模式全部已同步跑完）
+        // 高速模式：先注入放行聊天，再启动后台裁判/升华，彻底不抢前台连接与 session
         // 升华只走独立TAG（injectSublimated），主TAG不再重复内联，避免同一批出现两遍
         setPipeline('inject');
         const recentBlock = buildRecentBlock(recent, s.recentDays);
         const retrievedBlock = buildRetrievedBlock(rerankedTraditional);
         const shortPoolBlock = buildShortPoolBlock(shortPoolGrouped, cap);
         injectMemory(s, recentBlock, retrievedBlock, shortPoolBlock, '');
+        // 注入已完成，主会话不再被阻塞：此时才启动后台任务
+        if (!isFull && pendingBg.length) {
+            log(`[后台] 注入完成，启动 ${pendingBg.length} 个后台任务（pool/a1/sub）`);
+            for (const run of pendingBg) { try { run(); } catch (e) { log(`[后台]启动失败: ${e.message}`); } }
+            pendingBg.length = 0;
+        }
         const fastMs = Date.now() - fastT0;
         const modeTag = isFull ? '全量同步' : '高速异步';
         const bgNote = (!isFull && (bgBusy(chatId, 'pool') || bgBusy(chatId, 'a1') || bgBusy(chatId, 'sub'))) ? ' · 裁判/升华后台追赶中' : '';
@@ -1075,6 +1101,12 @@ async function arcextreme_generate(chat, contextSize, abort, type) {
         console.error('[ArcEXtreme] 生成拦截失败', e);
         notify('生成拦截', false, e.message);
         setPipeline(null);
+        // 注入前异常：释放本轮已占的后台位，避免 5min TTL 内下轮被误判为忙
+        try {
+            if (bgTakenKinds && bgTakenKinds.length && bgChatForRelease) {
+                for (const k of bgTakenKinds) { try { bgRelease(bgChatForRelease, k); } catch {} }
+            }
+        } catch {}
     }
 }
 

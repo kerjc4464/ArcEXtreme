@@ -16,7 +16,7 @@ function groupBySoul(items){
     return g;
 }
 
-async function callSubAgentBatch(settings, batchItems, soulsContentMap, contextText, traceLabel) {
+async function callSubAgentBatch(settings, batchItems, soulsContentMap, contextText, traceLabel, sessionId) {
     let cfg = settings.subAgentLLM?.useExtract ? settings.extractLLM : settings.subAgentLLM;
     if ((!cfg || !cfg.apiUrl) && settings.extractLLM?.apiUrl) cfg = settings.extractLLM;
     if (!cfg || !cfg.apiUrl) throw new Error('SubAgent LLM 未配置（请在SubAgent面板填BaseURL或勾选“复用提取”）');
@@ -52,7 +52,7 @@ async function callSubAgentBatch(settings, batchItems, soulsContentMap, contextT
     const raw = await chatCompletion(cfg, [
         { role:'system', content: sys },
         { role:'user', content: user },
-    ], { json:true, _traceStep:'subagent', _traceLabel: traceLabel || `SubAgent×${batchItems.length}` });
+    ], { json:true, _traceStep:'subagent', _traceLabel: traceLabel || `SubAgent×${batchItems.length}`, ...(sessionId ? { session_id: sessionId } : {}) });
 
     const parsed = parseJson(raw) || {};
     let results = [];
@@ -78,7 +78,7 @@ async function callSubAgentBatch(settings, batchItems, soulsContentMap, contextT
 }
 
 // 单事件单调（crazy 45并发用）
-async function callSubAgentSingle(settings, item, soulsContentMap, contextText, traceLabel){
+async function callSubAgentSingle(settings, item, soulsContentMap, contextText, traceLabel, sessionId){
     let cfg = settings.subAgentLLM?.useExtract ? settings.extractLLM : settings.subAgentLLM;
     if ((!cfg || !cfg.apiUrl) && settings.extractLLM?.apiUrl) cfg = settings.extractLLM;
     if (!cfg || !cfg.apiUrl) throw new Error('SubAgent LLM 未配置');
@@ -92,7 +92,7 @@ async function callSubAgentSingle(settings, item, soulsContentMap, contextText, 
     const raw = await chatCompletion(cfg, [
         { role:'system', content: sys },
         { role:'user', content: user },
-    ], { json:true, _traceStep:'subagent', _traceLabel: traceLabel || `SubAgent ${item.soul}#${item.event_id}` });
+    ], { json:true, _traceStep:'subagent', _traceLabel: traceLabel || `SubAgent ${item.soul}#${item.event_id}`, ...(sessionId ? { session_id: sessionId } : {}) });
     const parsed = parseJson(raw) || {};
     let action = parsed.action || parsed.act || 'Skip';
     let why = String(parsed.why || parsed.reason || '').trim().slice(0,300);
@@ -106,7 +106,7 @@ async function callSubAgentSingle(settings, item, soulsContentMap, contextText, 
     return { event_id: item.event_id, soul: item.soul, action, why, reason: why };
 }
 
-export async function evaluateShortPool(settings, poolItems, soulsContentMap, contextText, userMessage) {
+export async function evaluateShortPool(settings, poolItems, soulsContentMap, contextText, userMessage, sessionId = null) {
     if (!poolItems || !poolItems.length) return [];
     const enriched = poolItems.map(p=> ({ ...p, userMessage }));
     const mode = settings.shortPool?.subAgentMode || 'perRole';
@@ -115,7 +115,7 @@ export async function evaluateShortPool(settings, poolItems, soulsContentMap, co
     if (mode === 'perEvent') {
         // 真·45并发：每事件一LLM请求，全部并发
         const promises = enriched.map(item =>
-            callSubAgentSingle(settings, item, soulsContentMap, contextText, `SubAgent ${item.soul}#${item.event_id}`)
+            callSubAgentSingle(settings, item, soulsContentMap, contextText, `SubAgent ${item.soul}#${item.event_id}`, sessionId)
                 .catch(e=> ({ event_id: item.event_id, soul: item.soul||item.pool_soul, action:'Skip', why:'', reason:`single fail: ${e.message}`}))
         );
         const results = await Promise.all(promises);
@@ -134,7 +134,7 @@ export async function evaluateShortPool(settings, poolItems, soulsContentMap, co
             const res=[];
             for(const b of batches){
                 try{
-                    const r = await callSubAgentBatch(settings, b, soulsContentMap, contextText, `SubAgent ${soul}×${b.length}`);
+                    const r = await callSubAgentBatch(settings, b, soulsContentMap, contextText, `SubAgent ${soul}×${b.length}`, sessionId);
                     res.push(...r);
                 }catch(e){
                     for(const it of b) res.push({ event_id: it.event_id, soul, action:'Skip', why:'', reason:`batch fail: ${e.message}`});
@@ -152,7 +152,7 @@ export async function evaluateShortPool(settings, poolItems, soulsContentMap, co
     const all = [];
     for (const b of batches) {
         try {
-            const r = await callSubAgentBatch(settings, b, soulsContentMap, contextText, `SubAgent裁判×${b.length}`);
+            const r = await callSubAgentBatch(settings, b, soulsContentMap, contextText, `SubAgent裁判×${b.length}`, sessionId);
             all.push(...r);
         } catch(e) {
             for(const it of b) all.push({ event_id: it.event_id, soul: it.soul||it.pool_soul, action:'Skip', why:'', reason:`batch fail: ${e.message}`});
